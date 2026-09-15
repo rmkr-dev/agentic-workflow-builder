@@ -43,8 +43,9 @@ See [docs/setup.md](docs/setup.md) for prerequisites, env vars, and verification
 
 ```bash
 agentforge doctor --full
-agentforge validate examples/01-single/workflow.yaml
-agentforge run examples/01-single/workflow.yaml --input "Hello" --non-interactive
+agentforge validate examples/12-security-incident/workflow.yaml
+agentforge run examples/12-security-incident/workflow.yaml \
+  --input-file examples/12-security-incident/input.json --auto-approve --non-interactive
 agentforge generate examples/01-single/workflow.yaml --out ./generated/single-agent
 ```
 
@@ -75,12 +76,15 @@ print(project.path)
 
 ### Design from natural language
 
-Multi-intent tasks compose patterns (research + write + approval keep all implied agents):
+Multi-intent tasks compose patterns (research + write + approval keep all implied agents).
+CVE / incident wording seeds planner + parallel specialists + critic + approval:
 
 ```bash
-agentforge design --task "Research then write a summary with human approval" --out workflow.yaml
+agentforge design --task "Analyze a CVE with parallel vulnerability, cloud, and IAM specialists, critic review, quality evaluation, and human approval before remediation" --out workflow.yaml
 agentforge validate workflow.yaml
 ```
+
+The worked example is [`examples/12-security-incident`](examples/12-security-incident/README.md).
 
 ## CLI
 
@@ -106,6 +110,7 @@ Full workflows: [docs/usage.md](docs/usage.md).
 ```bash
 agentforge evaluate examples/01-single/workflow.yaml --golden tests/fixtures/golden_pass.json
 agentforge run examples/01-single/workflow.yaml --input "hi"
+agentforge inspect examples/01-single/workflow.yaml
 agentforge trace <thread_id> --format jsonl
 ```
 
@@ -120,6 +125,7 @@ single · sequential · parallel / fan-out-fan-in · supervisor · hierarchical 
 | `01`–`09` | Core patterns (single → HITL/evaluator) |
 | `10-mcp` | Live MCP stdio echo + explicit grants |
 | `11-security` | Fail-closed `default_deny` / ungated CLI |
+| **`12-security-incident`** | **Full-flow CVE pipeline** (parallel specialists, critic, HITL resume, evaluate, generate) |
 
 ## Documentation
 

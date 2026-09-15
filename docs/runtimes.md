@@ -4,7 +4,9 @@
 
 Status: **working** for all IR node types used in examples.
 
-Capabilities: compile, validate, run, resume, stream, cancel, inspect, serialize/deserialize, checkpoints, HITL, parallel, conditional, loops, subworkflows, MCP (live stdio/SSE via `mcp` package + grants), evaluation, guardrails.
+Capabilities: compile, validate, run, resume, stream, cancel, inspect, serialize/deserialize, **durable HITL checkpoints** (`.agentforge/checkpoints.pkl`), parallel, conditional, loops, subworkflows, MCP (live stdio/SSE via `mcp` package + grants), evaluation, guardrails.
+
+`agentforge compile workflow.yaml` prints the required-capability matrix for the chosen runtime.
 
 ## Microsoft Agent Framework
 

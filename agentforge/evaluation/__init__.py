@@ -144,16 +144,29 @@ class EvaluationEngine:
         if isinstance(golden, dict):
             return golden
         path = Path(str(golden))
-        if not path.exists():
+        resolved = self._resolve_path(path, ir)
+        if not resolved.exists():
             return {"__missing__": str(path)}
-        text = path.read_text(encoding="utf-8")
-        if path.suffix.lower() in {".yaml", ".yml"}:
+        text = resolved.read_text(encoding="utf-8")
+        if resolved.suffix.lower() in {".yaml", ".yml"}:
             import yaml
 
             data = yaml.safe_load(text)
             return data if isinstance(data, dict) else {"expected_output": data}
         data = json.loads(text)
         return data if isinstance(data, dict) else {"expected_output": data}
+
+    @staticmethod
+    def _resolve_path(path: Path, ir: WorkflowIR) -> Path:
+        if path.exists():
+            return path
+        source = getattr(ir, "source_path", None)
+        if source:
+            parent = Path(source).parent
+            for candidate in (parent / path, parent / path.name, Path.cwd() / path):
+                if candidate.exists():
+                    return candidate
+        return path
 
     def _score_golden(
         self, output: dict[str, Any], golden: dict[str, Any]
@@ -222,10 +235,25 @@ class EvaluationEngine:
     def _score_schema(
         self, output: dict[str, Any], schema: dict[str, Any]
     ) -> tuple[float, str, bool]:
-        """Lightweight schema: required keys and optional type names."""
+        """JSON Schema when possible; otherwise required keys / type names.
+
+        Nested reports live on ``output['report']`` or as JSON in ``output['output']``.
+        """
+        instance = self._schema_instance(output, schema)
+        if schema.get("type") == "object" or schema.get("properties") or schema.get("$schema"):
+            try:
+                import jsonschema
+
+                jsonschema.validate(instance=instance, schema=schema)
+                return 1.0, "schema ok", True
+            except ImportError:
+                pass
+            except Exception as exc:
+                return 0.0, str(getattr(exc, "message", exc)), False
+
         required = list(schema.get("required") or schema.get("required_keys") or [])
         types = dict(schema.get("properties") or schema.get("types") or {})
-        missing = [k for k in required if k not in output]
+        missing = [k for k in required if k not in instance]
         type_errors: list[str] = []
         type_map = {
             "string": str,
@@ -241,11 +269,11 @@ class EvaluationEngine:
             "bool": bool,
         }
         for key, typ in types.items():
-            if key not in output:
+            if key not in instance:
                 continue
             expected = typ.get("type") if isinstance(typ, dict) else typ
             py = type_map.get(str(expected).lower())
-            if py and not isinstance(output[key], py):
+            if py and not isinstance(instance[key], py):
                 type_errors.append(f"{key} expected {expected}")
         ok = not missing and not type_errors
         notes = []
@@ -254,6 +282,29 @@ class EvaluationEngine:
         if type_errors:
             notes.extend(type_errors)
         return (1.0 if ok else 0.0), ("; ".join(notes) or "schema ok"), ok
+
+    @staticmethod
+    def _schema_instance(output: dict[str, Any], schema: dict[str, Any]) -> dict[str, Any]:
+        required = list(schema.get("required") or schema.get("required_keys") or [])
+        if required and all(k in output for k in required):
+            return output
+        report = output.get("report")
+        if isinstance(report, dict):
+            if not required or all(k in report for k in required):
+                return report
+            if any(k in report for k in required):
+                return report
+        raw = output.get("output")
+        if isinstance(raw, dict):
+            return raw
+        if isinstance(raw, str):
+            try:
+                parsed = json.loads(raw)
+                if isinstance(parsed, dict):
+                    return parsed
+            except (TypeError, json.JSONDecodeError):
+                pass
+        return output
 
     def _llm_judge(self, ir: WorkflowIR, text: str, rubric: str) -> tuple[float, str]:
         """Optional LLM-as-judge. Mock-safe: deterministic score when mock mode."""

@@ -78,6 +78,31 @@ class Linter:
                 )
             )
 
+        if ir.evaluation.enabled and ir.evaluation.output_schema is None:
+            report.add(
+                Diagnostic(
+                    code="LINT008",
+                    severity=Severity.INFO,
+                    path="spec.evaluation.output_schema",
+                    message="Evaluation enabled without output_schema",
+                    suggestion="Add a JSON Schema for the structured report so evaluate can gate quality",
+                )
+            )
+
+        schema = ir.state_schema or {}
+        if len([n for n in ir.nodes if n.type == NodeType.AGENT]) >= 3 and not (
+            schema.get("properties") or schema.get("required")
+        ):
+            report.add(
+                Diagnostic(
+                    code="LINT009",
+                    severity=Severity.INFO,
+                    path="spec.state_schema",
+                    message="Multi-agent workflow has no JSON Schema state_schema",
+                    suggestion="Declare input/output contracts (e.g. cve_id, cloud, identity)",
+                )
+            )
+
         # Fan-out without join
         parallels = [n for n in ir.nodes if n.type == NodeType.PARALLEL]
         joins = [n for n in ir.nodes if n.type == NodeType.JOIN]

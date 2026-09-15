@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import operator
 import uuid
 from collections.abc import Iterator
@@ -32,6 +33,7 @@ from agentforge.runtimes.base.helpers import (
     resolve_llm_config,
     supervisor_worker_ids,
 )
+from agentforge.runtimes.langgraph.checkpointer import DurableMemorySaver
 from agentforge.schema import NodeType
 from agentforge.security.guardrails import GuardrailEngine
 from agentforge.tools.registry import ToolRegistry
@@ -57,6 +59,10 @@ class GraphState(TypedDict, total=False):
     approved: Annotated[bool, _last]
     pending_approval: Annotated[bool, _last]
     node_outputs: Annotated[dict[str, Any], _merge_dicts]
+    artifacts: Annotated[dict[str, Any], _merge_dicts]
+    report: Annotated[dict[str, Any], _last]
+    payload: Annotated[dict[str, Any], _merge_dicts]
+    eval_passed: Annotated[bool, _last]
     error: Annotated[str, _last]
     meta: Annotated[dict[str, Any], _merge_dicts]
 
@@ -64,10 +70,20 @@ class GraphState(TypedDict, total=False):
 class LangGraphAdapter(RuntimeAdapter):
     name = "langgraph"
 
-    def __init__(self, store: SQLiteRunStore | None = None) -> None:
+    def __init__(
+        self,
+        store: SQLiteRunStore | None = None,
+        checkpointer: DurableMemorySaver | None = None,
+    ) -> None:
         self.store = store or SQLiteRunStore()
         self._compiled: dict[str, Any] = {}
         self._ir_by_thread: dict[str, WorkflowIR] = {}
+        self._checkpointer = checkpointer
+
+    def _saver(self) -> DurableMemorySaver:
+        if self._checkpointer is None:
+            self._checkpointer = DurableMemorySaver()
+        return self._checkpointer
 
     def capabilities(self) -> list[CapabilityInfo]:
         supported = [
@@ -102,7 +118,6 @@ class LangGraphAdapter(RuntimeAdapter):
 
     def compile(self, ir: WorkflowIR) -> Any:
         try:
-            from langgraph.checkpoint.memory import MemorySaver
             from langgraph.graph import END, START, StateGraph
             from langgraph.types import interrupt
         except ImportError as exc:  # pragma: no cover
@@ -128,6 +143,32 @@ class LangGraphAdapter(RuntimeAdapter):
                 system = agent.system_prompt if agent else f"You are {agent_id}."
                 llm = resolve_llm_config(agent.llm) if agent else resolve_llm_config()
                 user_input = str(state.get("input", ""))
+                payload = state.get("payload") if isinstance(state.get("payload"), dict) else {}
+                thread_id = str((state.get("meta") or {}).get("thread_id") or "")
+                artifacts = dict(state.get("artifacts") or {})
+                if thread_id:
+                    emitter.emit(
+                        thread_id, "node_start", {"node": node_id, "type": "AGENT", "agent": agent_id}
+                    )
+                declared = list(agent.tools) if agent else []
+                tool_notes: list[str] = []
+                for tid in declared:
+                    policies.check_tool(tid)
+                    tool_result = tools.invoke(tid, dict(state))
+                    artifacts[tid] = tool_result
+                    snippet = json.dumps(tool_result, default=str)
+                    if len(snippet) > 800:
+                        snippet = snippet[:797] + "..."
+                    tool_notes.append(f"{tid}: {snippet}")
+                    if thread_id:
+                        emitter.emit(thread_id, "tool_invoked", {"node": node_id, "tool": tid})
+                if payload:
+                    context = json.dumps(payload, default=str)
+                    if len(context) > 2000:
+                        context = context[:1997] + "..."
+                    user_input = f"{user_input}\n\nStructured payload:\n{context}".strip()
+                if tool_notes:
+                    user_input = f"{user_input}\n\nTool results:\n" + "\n".join(tool_notes)
                 text = llm_respond(system, user_input, agent_id=agent_id, config=llm)
                 text = redact_secrets(text) if ir.policies.security.redact_outputs else text
                 decision = guardrails.check(text)
@@ -144,6 +185,7 @@ class LangGraphAdapter(RuntimeAdapter):
                     "output": text,
                     "messages": [{"role": "assistant", "agent": agent_id, "content": text}],
                     "node_outputs": outs,
+                    "artifacts": artifacts,
                     "meta": {
                         **(state.get("meta") or {}),
                         "llm_mode": llm.get("mode", "mock"),
@@ -174,6 +216,14 @@ class LangGraphAdapter(RuntimeAdapter):
                     result["output"] = f"{text} [route={route}]"
                     outs[node_id] = result["output"]
                     result["node_outputs"] = outs
+                if role in {"critic", "reviewer"} or agent_id == "critic":
+                    meta = dict(result["meta"])
+                    visits = int(meta.get("critic_visits") or 0) + 1
+                    meta["critic_visits"] = visits
+                    result["meta"] = meta
+                    result["needs_revision"] = visits < 2
+                if thread_id:
+                    emitter.emit(thread_id, "node_end", {"node": node_id, "agent": agent_id})
                 return result
 
             return _node
@@ -181,10 +231,25 @@ class LangGraphAdapter(RuntimeAdapter):
         def make_tool_node(node_id: str, tool_id: str):
             def _node(state: GraphState) -> dict[str, Any]:
                 policies.check_tool(tool_id)
+                thread_id = str((state.get("meta") or {}).get("thread_id") or "")
+                if thread_id:
+                    emitter.emit(thread_id, "tool_invoked", {"node": node_id, "tool": tool_id})
                 result = tools.invoke(tool_id, dict(state))
                 outs = dict(state.get("node_outputs") or {})
                 outs[node_id] = result
-                return {"output": str(result), "node_outputs": outs}
+                artifacts = dict(state.get("artifacts") or {})
+                artifacts[tool_id] = result
+                payload: dict[str, Any] = {
+                    "output": result if isinstance(result, str) else json.dumps(result, default=str),
+                    "node_outputs": outs,
+                    "artifacts": artifacts,
+                }
+                if isinstance(result, dict) and (
+                    tool_id in {"assemble_cve_report", "emit_report"}
+                    or {"cve_id", "severity"} <= set(result)
+                ):
+                    payload["report"] = result
+                return payload
 
             return _node
 
@@ -197,13 +262,35 @@ class LangGraphAdapter(RuntimeAdapter):
         def make_evaluator_node(node_id: str, rubric: str | None):
             def _node(state: GraphState) -> dict[str, Any]:
                 output = str(state.get("output", ""))
+                report = state.get("report") if isinstance(state.get("report"), dict) else {}
                 score = 0.9 if output and "blocked" not in output.lower() else 0.2
-                scores = {"correctness": score, "safety": 0.95, "rubric": rubric or ""}
+                schema = ir.evaluation.output_schema or {}
+                required = list(schema.get("required") or []) if isinstance(schema, dict) else []
+                if required:
+                    target = report if report else None
+                    if target is None:
+                        try:
+                            parsed = json.loads(output)
+                            target = parsed if isinstance(parsed, dict) else None
+                        except (TypeError, json.JSONDecodeError):
+                            target = None
+                    if target is None:
+                        score = min(score, 0.4)
+                    else:
+                        missing = [k for k in required if k not in target]
+                        if missing:
+                            score = min(score, 0.35)
                 passed = score >= ir.evaluation.pass_threshold
+                scores = {"correctness": score, "safety": 0.95, "rubric": rubric or ""}
                 return {
                     "scores": scores,
                     "output": output,
-                    "meta": {**(state.get("meta") or {}), "eval_passed": passed, "evaluator": node_id},
+                    "eval_passed": passed,
+                    "meta": {
+                        **(state.get("meta") or {}),
+                        "eval_passed": passed,
+                        "evaluator": node_id,
+                    },
                 }
 
             return _node
@@ -258,7 +345,7 @@ class LangGraphAdapter(RuntimeAdapter):
 
         def join_node(state: GraphState) -> dict[str, Any]:
             outs = state.get("node_outputs") or {}
-            merged = " | ".join(str(v) for v in outs.values()) if outs else state.get("output", "")
+            merged = " | ".join(f"{k}={v}" for k, v in outs.items()) if outs else state.get("output", "")
             return {"output": merged}
 
         def parallel_node(state: GraphState) -> dict[str, Any]:
@@ -388,11 +475,40 @@ class LangGraphAdapter(RuntimeAdapter):
                     {"continue": cont_target, "done": done_target},
                 )
 
-        checkpointer = MemorySaver()
+        checkpointer = self._saver()
         compiled = graph.compile(checkpointer=checkpointer)
         key = ir.name
         self._compiled[key] = {"graph": compiled, "ir": ir, "emitter": emitter, "policies": policies}
         return compiled
+
+    @staticmethod
+    def _pack_output(result: Any) -> dict[str, Any]:
+        if not isinstance(result, dict):
+            return {"output": str(result), "scores": {}, "node_outputs": {}, "artifacts": {}, "report": {}}
+        artifacts = result.get("artifacts") if isinstance(result.get("artifacts"), dict) else {}
+        report = result.get("report") if isinstance(result.get("report"), dict) else {}
+        if not report and artifacts:
+            for key in ("assemble_cve_report", "emit_report"):
+                if isinstance(artifacts.get(key), dict):
+                    report = artifacts[key]
+                    break
+            if not report:
+                for value in artifacts.values():
+                    if isinstance(value, dict) and "cve_id" in value and "severity" in value:
+                        report = value
+                        break
+        output = result.get("output")
+        if report and (not output or output == "{}"):
+            output = json.dumps(report, default=str)
+        return {
+            "output": output,
+            "scores": result.get("scores") or {},
+            "node_outputs": result.get("node_outputs") or {},
+            "artifacts": artifacts or {},
+            "report": report or {},
+            "approved": result.get("approved", False),
+            "eval_passed": result.get("eval_passed", False),
+        }
 
     def run(self, ir: WorkflowIR, request: RunRequest) -> RunResult:
         self.require(Capability.RUN)
@@ -412,8 +528,22 @@ class LangGraphAdapter(RuntimeAdapter):
 
         config = {"configurable": {"thread_id": thread_id}}
         requested_route = request.input.get("route")
+        reserved = {
+            "input",
+            "query",
+            "auto_approve",
+            "route",
+            "needs_revision",
+            "continue",
+            "thread_id",
+        }
+        payload = {k: v for k, v in request.input.items() if k not in reserved}
+        raw_input = request.input.get("input", request.input.get("query"))
+        if raw_input is None:
+            raw_input = json.dumps(payload, default=str) if payload else ""
+        auto_approve = bool(request.input.get("auto_approve", False))
         state_in: dict[str, Any] = {
-            "input": str(request.input.get("input", request.input.get("query", ""))),
+            "input": str(raw_input),
             "output": "",
             "messages": [],
             # Empty default lets supervisor/mock router choose workers first
@@ -425,10 +555,15 @@ class LangGraphAdapter(RuntimeAdapter):
             "approved": False,
             "pending_approval": False,
             "node_outputs": {},
+            "artifacts": {},
+            "report": {},
+            "payload": payload,
+            "eval_passed": False,
             "meta": {
-                "auto_approve": request.input.get("auto_approve", True),
+                "auto_approve": auto_approve,
                 "requested_route": requested_route,
-                **{k: v for k, v in request.input.items() if k not in {"input", "query"}},
+                "thread_id": thread_id,
+                **payload,
             },
         }
         # Seed condition helpers
@@ -456,20 +591,16 @@ class LangGraphAdapter(RuntimeAdapter):
             status = RunState.COMPLETED
             if interrupt_val:
                 status = RunState.WAITING_FOR_APPROVAL
-                payload = interrupt_val
-                if isinstance(payload, (list, tuple)) and payload:
-                    first = payload[0]
+                payload_int = interrupt_val
+                if isinstance(payload_int, (list, tuple)) and payload_int:
+                    first = payload_int[0]
                     interrupt_val = getattr(first, "value", first)
                     if isinstance(interrupt_val, dict) and interrupt_val.get("type") == "human_approval":
                         status = RunState.WAITING_FOR_APPROVAL
                     else:
                         status = RunState.WAITING_FOR_INPUT
 
-            out = {
-                "output": result.get("output") if isinstance(result, dict) else str(result),
-                "scores": result.get("scores") if isinstance(result, dict) else {},
-                "node_outputs": result.get("node_outputs") if isinstance(result, dict) else {},
-            }
+            out = self._pack_output(result)
             ckpt = f"ckpt-{uuid.uuid4().hex[:8]}"
             self.store.save_run(thread_id, status.value, out if isinstance(out, dict) else {}, ckpt)
             emitter.emit(thread_id, "run_finished", {"status": status.value, "output": out})
@@ -487,19 +618,20 @@ class LangGraphAdapter(RuntimeAdapter):
             name = type(exc).__name__
             if "Interrupt" in name:
                 status = RunState.WAITING_FOR_APPROVAL
-                self.store.save_run(thread_id, status.value, {"input": state_in}, None)
+                paused = self._pack_output({"output": state_in.get("output"), "payload": payload})
+                self.store.save_run(thread_id, status.value, paused, None)
                 return RunResult(
                     status=status,
-                    output={"output": state_in.get("output")},
+                    output=paused,
                     thread_id=thread_id,
-                    interrupt={"error": str(exc)},
+                    interrupt={"error": str(exc), "type": "human_approval"},
                     events=self.store.list_events(thread_id),
                 )
             self.store.save_run(thread_id, RunState.FAILED.value, {"error": str(exc)}, None)
             emitter.emit(thread_id, "run_failed", {"error": str(exc)})
             return RunResult(
                 status=RunState.FAILED,
-                output={},
+                output={"error": str(exc)},
                 thread_id=thread_id,
                 error=str(exc),
                 events=self.store.list_events(thread_id),
@@ -515,23 +647,55 @@ class LangGraphAdapter(RuntimeAdapter):
         try:
             from langgraph.types import Command
 
+            try:
+                snapshot = graph.get_state(config)
+            except Exception:
+                snapshot = None
+            empty = snapshot is None or (
+                not getattr(snapshot, "values", None) and not getattr(snapshot, "next", None)
+            )
+            if empty:
+                saver_path = str(self._saver().path)
+                return RunResult(
+                    status=RunState.FAILED,
+                    output={},
+                    thread_id=request.thread_id,
+                    error=(
+                        f"No checkpoint for thread_id {request.thread_id!r}. "
+                        "Run the workflow first (without --auto-approve so HITL can pause), "
+                        f"keep AGENTFORGE_DATA_DIR, and do not delete {saver_path}."
+                    ),
+                )
+
             resume_val = request.resume_value
             if request.approval is not None:
                 resume_val = {"approved": request.approval}
             result = graph.invoke(Command(resume=resume_val), config)
             status = RunState.COMPLETED
+            interrupt_val = None
             if isinstance(result, dict) and result.get("__interrupt__"):
                 status = RunState.WAITING_FOR_INPUT
-            out = {
-                "output": result.get("output") if isinstance(result, dict) else str(result),
-                "scores": result.get("scores") if isinstance(result, dict) else {},
-            }
+                interrupt_val = result.get("__interrupt__")
+            out = self._pack_output(result)
             self.store.save_run(request.thread_id, status.value, out, None)
-            return RunResult(status=status, output=out, thread_id=request.thread_id)
+            return RunResult(
+                status=status,
+                output=out,
+                thread_id=request.thread_id,
+                interrupt=interrupt_val if isinstance(interrupt_val, dict) else None,
+            )
         except Exception as exc:
+            name = type(exc).__name__
+            if "Interrupt" in name:
+                return RunResult(
+                    status=RunState.WAITING_FOR_APPROVAL,
+                    output={},
+                    thread_id=request.thread_id,
+                    interrupt={"error": str(exc)},
+                )
             return RunResult(
                 status=RunState.FAILED,
-                output={},
+                output={"error": str(exc)},
                 thread_id=request.thread_id,
                 error=str(exc),
             )

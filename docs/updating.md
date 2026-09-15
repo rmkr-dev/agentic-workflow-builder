@@ -31,7 +31,7 @@ pip install -e ".[microsoft,mcp]"
 ```bash
 pip install -U 'agentforge[dev]'
 # pin if needed:
-pip install 'agentforge==0.1.1'
+pip install 'agentforge==0.1.2'
 ```
 
 ## Changelog process
@@ -43,6 +43,19 @@ pip install 'agentforge==0.1.1'
 5. GitHub Actions `build-package.yml` builds sdist/wheel on pushes to the default branch
    (and tags). Publishing to TestPyPI happens only when `TEST_PYPI_API_TOKEN` is configured
    as a repository secret — CI remains green without it.
+
+## Migration notes (0.1.2)
+
+- **HITL** — `agentforge run` no longer auto-approves. Pass `--auto-approve` for a
+  complete CI run, or resume with `agentforge resume ... --approve/--reject`.
+  Checkpoints persist under `.agentforge/checkpoints.pkl`.
+- **Inputs** — `--input-file` / `--input-json` merge a JSON object into run state
+  (`payload`). Use this for CVE id + cloud/IAM context.
+- **inspect** — `agentforge inspect workflow.yaml` inspects the spec;
+  a `run-*` thread id still inspects a run.
+- **compile** — prints required-capability compatibility; unsupported runtimes raise.
+- **Architect** — CVE/incident tasks compose planner + parallel specialists +
+  critic + evaluator + HITL + finalizer.
 
 ## Migration notes (0.1.x)
 

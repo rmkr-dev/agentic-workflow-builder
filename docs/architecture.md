@@ -12,7 +12,7 @@ flowchart LR
   Compiler --> MS[Microsoft AF Adapter]
   IR --> Generator[Project Generator]
   Generator --> Repo[Standalone Agent Repo]
-  LG --> SQLite[(SQLite checkpoints/events)]
+  LG --> SQLite[(SQLite events + pickle checkpoints)]
 ```
 
 ## Packages
@@ -37,4 +37,5 @@ flowchart LR
 1. IR is the source of truth after parse.
 2. Adapters declare capabilities; unsupported features raise errors.
 3. Generated projects do **not** depend on the AgentForge package at runtime.
-4. LLM credentials come only from environment variables.
+4. HITL interrupts persist under `.agentforge/` so CLI `resume` works in a new process.
+5. LLM credentials come only from environment variables.

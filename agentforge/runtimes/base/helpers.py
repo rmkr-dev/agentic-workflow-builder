@@ -16,6 +16,11 @@ SECRET_PATTERNS = [
     re.compile(r"sk-[A-Za-z0-9]{20,}"),
 ]
 
+
+def agentforge_data_dir() -> Path:
+    """Local data directory for runs DB, events, and durable checkpoints."""
+    return Path(os.environ.get("AGENTFORGE_DATA_DIR", ".agentforge"))
+
 SUPERVISOR_ROLES = frozenset({"supervisor", "orchestrator", "manager", "router"})
 DEFAULT_MOCK_SUPERVISOR_HOPS = 8
 
@@ -274,8 +279,8 @@ def redact_secrets(text: str) -> str:
 class SQLiteRunStore:
     """Local SQLite store for checkpoints, events, and run metadata."""
 
-    def __init__(self, path: str | Path = ".agentforge/runs.db") -> None:
-        self.path = Path(path)
+    def __init__(self, path: str | Path | None = None) -> None:
+        self.path = Path(path) if path is not None else agentforge_data_dir() / "runs.db"
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._init()
 
@@ -377,3 +382,24 @@ class SQLiteRunStore:
                 "SELECT 1 FROM cancelled WHERE thread_id=?", (thread_id,)
             ).fetchone()
             return row is not None
+
+    def list_runs(self, limit: int = 20) -> list[dict[str, Any]]:
+        with self._conn() as conn:
+            rows = conn.execute(
+                """
+                SELECT thread_id, status, checkpoint_id, updated_at
+                FROM runs
+                ORDER BY updated_at DESC
+                LIMIT ?
+                """,
+                (int(limit),),
+            ).fetchall()
+            return [
+                {
+                    "thread_id": r["thread_id"],
+                    "status": r["status"],
+                    "checkpoint_id": r["checkpoint_id"],
+                    "updated_at": r["updated_at"],
+                }
+                for r in rows
+            ]

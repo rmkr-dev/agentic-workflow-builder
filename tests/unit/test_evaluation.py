@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from agentforge.evaluation import EvaluationEngine
@@ -32,6 +33,34 @@ def test_golden_fail():
     )
     assert not report.passed
     assert report.details["golden"]["passed"] is False
+
+
+def test_nested_report_schema():
+    ir = SpecLoader().load(EXAMPLES / "01-single" / "workflow.yaml")
+    ir = ir.model_copy(
+        update={
+            "evaluation": ir.evaluation.model_copy(
+                update={
+                    "output_schema": {
+                        "type": "object",
+                        "required": ["cve_id", "severity"],
+                        "properties": {
+                            "cve_id": {"type": "string"},
+                            "severity": {"type": "string"},
+                        },
+                    }
+                }
+            )
+        }
+    )
+    report = EvaluationEngine().evaluate(
+        ir,
+        {
+            "output": json.dumps({"cve_id": "CVE-2024-3094", "severity": "CRITICAL"}),
+            "report": {"cve_id": "CVE-2024-3094", "severity": "CRITICAL"},
+        },
+    )
+    assert report.details["schema"]["passed"] is True
 
 
 def test_llm_judge_mock_safe(monkeypatch):

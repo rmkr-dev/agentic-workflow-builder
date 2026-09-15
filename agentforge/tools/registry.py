@@ -12,6 +12,13 @@ import httpx
 from agentforge.ir.models import WorkflowIR
 from agentforge.mcp.client import MCPClient
 from agentforge.schema import ToolKind, ToolSpec
+from agentforge.tools.fixtures import (
+    assemble_cve_report,
+    cloud_exposure,
+    iam_impact,
+    nvd_lookup,
+    ticket_note,
+)
 
 
 class ToolPermissionError(PermissionError):
@@ -29,6 +36,11 @@ class ToolRegistry:
             "lower": lambda s: str(s.get("input", "")).lower(),
             "word_count": lambda s: len(str(s.get("input", "")).split()),
             "identity": lambda s: dict(s),
+            "nvd_lookup": nvd_lookup,
+            "cloud_exposure": cloud_exposure,
+            "iam_impact": iam_impact,
+            "assemble_cve_report": assemble_cve_report,
+            "ticket_note": ticket_note,
         }
 
     def invoke(self, tool_id: str, state: dict[str, Any]) -> Any:
@@ -39,14 +51,24 @@ class ToolRegistry:
 
         tool = self.tools.get(tool_id)
         if not tool:
-            raise KeyError(f"Unknown tool '{tool_id}'")
+            known = sorted(self.tools) or ["(none declared in spec.tools)"]
+            raise KeyError(
+                f"Unknown tool '{tool_id}'. Declared tools: {known}. "
+                "Add it under spec.tools and policies.tool.allowed_tools, "
+                "or use kind: python with entrypoint: module:function."
+            )
 
         self._enforce_permissions(tool)
 
         if tool.kind == ToolKind.DETERMINISTIC:
             fn = self._deterministic.get(tool.deterministic_fn or "")
             if not fn:
-                raise ValueError(f"Unknown deterministic_fn '{tool.deterministic_fn}'")
+                known = sorted(self._deterministic)
+                raise ValueError(
+                    f"Unknown deterministic_fn '{tool.deterministic_fn}'. "
+                    f"Built-ins: {known}. For custom logic use kind: python "
+                    "entrypoint: your_module:function (credentials via env only)."
+                )
             return fn(state)
 
         if tool.kind == ToolKind.REST:

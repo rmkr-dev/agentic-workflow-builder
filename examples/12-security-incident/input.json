@@ -1,0 +1,27 @@
+{
+  "cve_id": "CVE-2024-3094",
+  "cloud": {
+    "provider": "aws",
+    "account_id": "123456789012",
+    "region": "us-east-1",
+    "assets": [
+      {
+        "type": "ec2",
+        "id": "i-0abc12sshd",
+        "image": "ami-linux-custom",
+        "public": true,
+        "notes": "Internet-facing bastion with sshd"
+      },
+      {
+        "type": "lambda",
+        "id": "fn-deploy",
+        "runtime": "python3.12",
+        "public": false
+      }
+    ]
+  },
+  "identity": {
+    "roles": ["Admin", "CIDeploy"],
+    "overprivileged": true
+  }
+}

@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.1.2 — 2026-09-15
+
+- Durable HITL checkpoints so `agentforge resume` works across processes
+- `--input-file` / `--input-json` structured run inputs; `inspect` works on specs
+- Agents invoke declared tools; NVD/cloud/IAM fixture tools for offline security workflows
+- Architect CVE/incident composition (planner + parallel specialists + critic + HITL)
+- Compile prints runtime capability matrix and fails closed on unsupported runtimes
+- Evaluation of nested JSON Schema reports; golden files resolve next to the workflow
+- `examples/12-security-incident` full-flow CVE pipeline (validate → HITL resume → generate)
+- Generated projects: valid TOML descriptions, bounded loop/router edges, fixture tools + HITL
+
 ## 0.1.1 — 2026-09-15
 
 - Live MCP stdio/SSE client with explicit grants + `examples/10-mcp`

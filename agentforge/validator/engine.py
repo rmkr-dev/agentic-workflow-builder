@@ -98,6 +98,23 @@ class ValidationEngine:
                         )
                     )
 
+        for agent_id, agent in ir.agents.items():
+            for tid in agent.tools:
+                if tid not in ir.tools and tid not in ir.agents:
+                    report.add(
+                        Diagnostic(
+                            code="WF016",
+                            severity=Severity.ERROR,
+                            path=f"spec.agents[{agent_id}].tools",
+                            message=f"Agent '{agent_id}' references unknown tool '{tid}'",
+                            suggestion=(
+                                "Declare the tool under spec.tools "
+                                "(python/rest/cli/deterministic/mcp) and add it to "
+                                "policies.tool.allowed_tools"
+                            ),
+                        )
+                    )
+
         # Agent/tool refs
         for n in ir.nodes:
             if n.type == NodeType.AGENT:

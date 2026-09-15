@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import time
+
 from agentforge.schema import PoliciesSpec
 
 
@@ -15,13 +17,27 @@ class PolicyEngine:
         self.steps = 0
         self.llm_calls = 0
         self.tool_calls = 0
+        self.started_at = time.monotonic()
 
     def reset(self) -> None:
         self.steps = 0
         self.llm_calls = 0
         self.tool_calls = 0
+        self.started_at = time.monotonic()
+
+    def check_timeout(self) -> None:
+        b = self.policies.budget
+        limit = float(b.timeout_seconds or 0)
+        if limit <= 0:
+            return
+        elapsed = time.monotonic() - self.started_at
+        if elapsed > limit:
+            raise PolicyViolation(
+                f"timeout_seconds exceeded ({limit:.1f}s elapsed {elapsed:.1f}s)"
+            )
 
     def check_budget_step(self) -> None:
+        self.check_timeout()
         self.steps += 1
         self.llm_calls += 1
         b = self.policies.budget
@@ -31,6 +47,7 @@ class PolicyEngine:
             raise PolicyViolation(f"max_llm_calls exceeded ({b.max_llm_calls})")
 
     def check_tool(self, tool_id: str) -> None:
+        self.check_timeout()
         self.tool_calls += 1
         b = self.policies.budget
         if self.tool_calls > b.max_tool_calls:

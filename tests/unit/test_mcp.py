@@ -47,7 +47,12 @@ def test_mcp_stub_when_no_command():
 def test_mcp_live_discovery_and_call():
     pytest.importorskip("mcp")
     client = MCPClient({"echo_server": _echo_server_spec()})
-    tools = client.list_tools("echo_server")
+    try:
+        tools = client.list_tools("echo_server")
+    except Exception as exc:
+        if "fileno" in str(exc):
+            pytest.skip("MCP stdio requires a real stderr fileno (pytest capture on Windows)")
+        raise
     names = {t["name"] for t in tools}
     assert "echo" in names
     assert all(t["granted"] for t in tools)
@@ -74,6 +79,8 @@ def test_mcp_example_run(monkeypatch, tmp_path):
     adapter = get_adapter("langgraph")
     adapter.compile(ir)
     result = adapter.run(ir, RunRequest(input={"input": "hello mcp", "auto_approve": True}))
+    if result.status.value == "FAILED" and result.error and "fileno" in str(result.error):
+        pytest.skip("MCP stdio requires a real stderr fileno (pytest capture on Windows)")
     assert result.status.value in {"COMPLETED", "FAILED"}
     # Tool output should appear in node_outputs or final output
     blob = str(result.output)

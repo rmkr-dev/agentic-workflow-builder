@@ -51,6 +51,9 @@ Copy `.env.example` and export only what you need. **Never commit secrets.**
 | `AGENTFORGE_LLM_BASE_URL` | OpenAI-compatible base URL | provider default |
 | `AGENTFORGE_EVAL_LLM_JUDGE` | Enable LLM-as-judge in evaluate | `0` |
 | `AGENTFORGE_EVAL_GOLDEN` | Default golden-file path | unset |
+| `AGENTFORGE_DATA_DIR` | SQLite runs + durable HITL checkpoints | `.agentforge` |
+| `AGENTFORGE_NVD_HTTP` | `1` = try live NVD REST in `nvd_lookup` | unset |
+| `AGENTFORGE_NVD_FIXTURE` | Extra CVE JSON catalog path | unset |
 
 Live mode requires `AGENTFORGE_LLM_MOCK=0` **and** an API key.
 
@@ -60,6 +63,7 @@ Live mode requires `AGENTFORGE_LLM_MOCK=0` **and** an API key.
 agentforge doctor --full
 agentforge validate examples/01-single/workflow.yaml
 agentforge run examples/01-single/workflow.yaml --input "Hello" --non-interactive
+agentforge validate examples/12-security-incident/workflow.yaml
 pytest -q
 ```
 

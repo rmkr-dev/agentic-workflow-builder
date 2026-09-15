@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "CVE risk report",
+  "type": "object",
+  "required": [
+    "cve_id",
+    "severity",
+    "summary",
+    "specialists",
+    "cloud_exposure",
+    "iam_impact",
+    "approval"
+  ],
+  "properties": {
+    "cve_id": { "type": "string", "pattern": "^CVE-[0-9]{4}-[0-9]+$" },
+    "title": { "type": ["string", "null"] },
+    "severity": { "type": "string" },
+    "cvss": { "type": ["number", "null"] },
+    "summary": { "type": "string" },
+    "specialists": { "type": "object" },
+    "cloud_exposure": { "type": "object" },
+    "iam_impact": { "type": "object" },
+    "quality": { "type": "object" },
+    "approval": {
+      "type": "object",
+      "required": ["required", "approved"],
+      "properties": {
+        "required": { "type": "boolean" },
+        "approved": { "type": "boolean" },
+        "status": { "type": "string" }
+      }
+    },
+    "remediation_actions": { "type": "array" },
+    "status": { "type": "string" }
+  }
+}

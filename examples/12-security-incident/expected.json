@@ -1,0 +1,26 @@
+{
+  "contains": "CVE-2024-3094",
+  "min_length": 40,
+  "forbidden": ["password=", "api_key", "sk-"],
+  "schema": {
+    "type": "object",
+    "required": [
+      "cve_id",
+      "severity",
+      "summary",
+      "specialists",
+      "cloud_exposure",
+      "iam_impact",
+      "approval"
+    ],
+    "properties": {
+      "cve_id": { "type": "string" },
+      "severity": { "type": "string" },
+      "summary": { "type": "string" },
+      "specialists": { "type": "object" },
+      "cloud_exposure": { "type": "object" },
+      "iam_impact": { "type": "object" },
+      "approval": { "type": "object" }
+    }
+  }
+}

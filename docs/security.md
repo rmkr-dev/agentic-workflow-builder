@@ -21,6 +21,9 @@ agentforge run examples/11-security/workflow.yaml --input "probe" --non-interact
 # expect non-zero exit / FAILED status
 ```
 
+See [`examples/12-security-incident`](../examples/12-security-incident) for a
+full HITL + policies + fixture-tools pipeline (CVE analysis).
+
 ## MCP grants
 
 ```yaml

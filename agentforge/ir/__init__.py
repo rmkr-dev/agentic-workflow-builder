@@ -108,7 +108,7 @@ class WorkflowIR(BaseModel):
                 NodeType.CONDITION: (f"{n.id}{{{n.id}}}"),
                 NodeType.PARALLEL: (f"{n.id}[[{n.id}]]"),
                 NodeType.JOIN: (f"{n.id}[[{n.id}]]"),
-                NodeType.HUMAN_APPROVAL: (f"{n.id}[/{n.id}/]"),
+                NodeType.HUMAN_APPROVAL: (f"{n.id}[HITL:{n.id}]"),
                 NodeType.GUARDRAIL: (f"{n.id}> {n.id} ]"),
             }.get(n.type, f"{n.id}[{n.type.value}:{n.id}]")
             lines.append(f"  {shape}")

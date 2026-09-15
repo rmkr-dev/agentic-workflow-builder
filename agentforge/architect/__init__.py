@@ -17,7 +17,7 @@ INTENT_KEYWORDS: list[tuple[str, list[str]]] = [
     ("evaluator", ["evaluat", "rubric", "score", "qa check", "quality check"]),
     ("reflection", ["reflect", "critique", "revise", "critic"]),
     ("supervisor", ["supervisor", "orchestrat", "delegate"]),
-    ("parallel", ["parallel", "fan-out", "fan out", "concurrent"]),
+    ("parallel", ["parallel", "fan-out", "fan out", "concurrent", "specialists"]),
     ("conditional", ["if ", "condition", "route", "branch"]),
     ("bounded_loop", ["loop", "retry", "until", "iterate"]),
     ("handoff", ["handoff", "hand off", "pass to"]),
@@ -28,8 +28,11 @@ INTENT_KEYWORDS: list[tuple[str, list[str]]] = [
 
 # Intent signals that imply agent roles (independent of pattern keyword winner).
 ROLE_SIGNALS: list[tuple[str, list[str]]] = [
-    ("researcher", ["research", "investigate", "gather", "search", "analyze"]),
-    ("writer", ["write", "draft", "summar", "compose", "author"]),
+    ("planner", ["plan", "decompose", "planner"]),
+    ("researcher", ["research", "investigate", "gather", "search", "analyze", "vulnerab", "cve", "nvd"]),
+    ("cloud_analyst", ["cloud", "exposure", "asset"]),
+    ("iam_analyst", ["iam", "identity", "privilege"]),
+    ("writer", ["write", "draft", "summar", "compose", "author", "report", "finaliz"]),
     ("critic", ["critique", "reflect", "revise", "critic"]),
     ("supervisor", ["supervisor", "orchestrat", "delegate"]),
 ]
@@ -50,7 +53,10 @@ class Architect:
         intents = self._infer_intents(task)
         chosen = pattern or self._primary_pattern(intents, task)
         wf_name = name or self._slug(task)
-        doc = self._compose_spec(task, chosen, intents, wf_name)
+        if self._is_incident_task(task) and chosen != "single":
+            doc = self._compose_incident_spec(task, intents, wf_name)
+        else:
+            doc = self._compose_spec(task, chosen, intents, wf_name)
 
         if os.environ.get("AGENTFORGE_LLM_API_KEY") and os.environ.get("AGENTFORGE_LLM_MOCK", "1") != "1":
             try:
@@ -113,6 +119,23 @@ class Architect:
                 return p
         return intents[0] if intents else "sequential"
 
+    def _is_incident_task(self, task: str) -> bool:
+        lower = task.lower()
+        keys = (
+            "cve",
+            "incident",
+            "vulnerability",
+            "vulnerabilities",
+            "security analysis",
+            "security incident",
+            "cloud exposure",
+            "iam specialist",
+            "iam analyst",
+            "iam impact",
+            "identity impact",
+        )
+        return any(k in lower for k in keys)
+
     def _infer_roles(self, task: str, intents: list[str]) -> list[str]:
         lower = task.lower()
         roles: list[str] = []
@@ -150,14 +173,28 @@ class Architect:
 
     def _agent_defs(self, task: str, roles: list[str]) -> list[dict[str, Any]]:
         prompts = {
+            "planner": f"Decompose the work into specialist tasks: {task}",
             "researcher": f"Research and analyze: {task}",
+            "vuln_researcher": "Look up the CVE (NVD-like) and summarize exploitability.",
+            "cloud_analyst": "Assess cloud exposure from inventory in the structured payload.",
+            "iam_analyst": "Assess IAM / identity blast radius from the structured payload.",
             "writer": "Write a concise answer from research notes.",
+            "finalizer": "Produce the final structured report. Do not invent secrets.",
             "critic": "Critique the draft and set needs_revision when improvements are needed.",
             "supervisor": "Delegate work to workers, then finish.",
         }
+        role_tools = {
+            "researcher": ["echo"],
+            "vuln_researcher": ["nvd_lookup"],
+            "cloud_analyst": ["cloud_exposure"],
+            "iam_analyst": ["iam_impact"],
+            "finalizer": ["assemble_cve_report"],
+        }
         agents: list[dict[str, Any]] = []
         for role in roles:
-            tools = ["echo"] if role == "researcher" else []
+            tools = list(role_tools.get(role, []))
+            if role == "researcher" and "cve" in task.lower():
+                tools = ["nvd_lookup"]
             agents.append(
                 {
                     "id": role,
@@ -309,6 +346,175 @@ class Architect:
         tags = ["designed", effective, *intents]
 
         return self._finalize_doc(task, effective, intents, name, agents, nodes, edges, tags)
+
+    def _compose_incident_spec(self, task: str, intents: list[str], name: str) -> dict[str, Any]:
+        """Planner + parallel specialists + critic + evaluator + HITL + finalizer."""
+        roles = [
+            "planner",
+            "vuln_researcher",
+            "cloud_analyst",
+            "iam_analyst",
+            "critic",
+            "finalizer",
+        ]
+        agents = self._agent_defs(task, roles)
+        specialists = ["vuln_researcher", "cloud_analyst", "iam_analyst"]
+        nodes: list[dict[str, Any]] = [
+            {"id": "start", "type": "START"},
+            {"id": "planner", "type": "AGENT", "agent": "planner"},
+            {"id": "fanout", "type": "PARALLEL", "parallel_of": specialists},
+        ]
+        edges: list[dict[str, Any]] = [
+            {"source": "start", "target": "planner"},
+            {"source": "planner", "target": "fanout"},
+        ]
+        for aid in specialists:
+            nodes.append({"id": aid, "type": "AGENT", "agent": aid})
+            edges.append({"source": "fanout", "target": aid})
+            edges.append({"source": aid, "target": "join"})
+        nodes.append({"id": "join", "type": "JOIN", "join_of": specialists})
+        nodes.append({"id": "critic", "type": "AGENT", "agent": "critic"})
+        nodes.append(
+            {
+                "id": "loop",
+                "type": "LOOP",
+                "loop_body": "critic",
+                "loop_condition": "needs_revision",
+                "max_iterations": 2,
+            }
+        )
+        nodes.append(
+            {
+                "id": "evaluate",
+                "type": "EVALUATOR",
+                "evaluator_rubric": "CVE report completeness, safety, and evidence",
+            }
+        )
+        nodes.append(
+            {
+                "id": "approve",
+                "type": "HUMAN_APPROVAL",
+                "approval_message": f"Approve remediation recommendations for: {task}?",
+            }
+        )
+        nodes.append({"id": "finalizer", "type": "AGENT", "agent": "finalizer"})
+        nodes.append({"id": "emit_report", "type": "TOOL", "tool": "assemble_cve_report"})
+        nodes.append({"id": "end", "type": "END"})
+        edges.extend(
+            [
+                {"source": "join", "target": "critic"},
+                {"source": "critic", "target": "loop"},
+                {"source": "loop", "target": "critic", "label": "revise"},
+                {"source": "loop", "target": "evaluate", "label": "done"},
+                {"source": "evaluate", "target": "approve"},
+                {"source": "approve", "target": "finalizer"},
+                {"source": "finalizer", "target": "emit_report"},
+                {"source": "emit_report", "target": "end"},
+            ]
+        )
+        tools = [
+            {
+                "id": "nvd_lookup",
+                "kind": "deterministic",
+                "deterministic_fn": "nvd_lookup",
+                "description": "NVD-like CVE lookup (offline catalog; optional HTTP)",
+                "permissions": {},
+            },
+            {
+                "id": "cloud_exposure",
+                "kind": "deterministic",
+                "deterministic_fn": "cloud_exposure",
+                "description": "Cloud inventory blast-radius analysis",
+                "permissions": {},
+            },
+            {
+                "id": "iam_impact",
+                "kind": "deterministic",
+                "deterministic_fn": "iam_impact",
+                "description": "IAM / identity impact analysis",
+                "permissions": {},
+            },
+            {
+                "id": "assemble_cve_report",
+                "kind": "deterministic",
+                "deterministic_fn": "assemble_cve_report",
+                "description": "Join specialist artifacts into a structured risk report",
+                "permissions": {},
+            },
+            {
+                "id": "echo",
+                "kind": "deterministic",
+                "deterministic_fn": "echo",
+                "description": "Echo input",
+                "permissions": {},
+            },
+        ]
+        allowed = ["nvd_lookup", "cloud_exposure", "iam_impact", "assemble_cve_report", "echo"]
+        tags = ["designed", "hitl", "parallel", "cve", *intents]
+        return {
+            "apiVersion": "agentforge/v1",
+            "kind": "Workflow",
+            "metadata": {
+                "name": name,
+                "description": task,
+                "version": "0.1.0",
+                "tags": list(dict.fromkeys(tags)),
+            },
+            "spec": {
+                "pattern": "hitl",
+                "runtime": "langgraph",
+                "agents": agents,
+                "tools": tools,
+                "nodes": nodes,
+                "edges": edges,
+                "state_schema": {
+                    "type": "object",
+                    "required": ["cve_id"],
+                    "properties": {
+                        "cve_id": {"type": "string"},
+                        "cloud": {"type": "object"},
+                        "identity": {"type": "object"},
+                    },
+                },
+                "policies": {
+                    "tool": {"default_deny": True, "allowed_tools": allowed},
+                    "budget": {
+                        "max_steps": 80,
+                        "max_llm_calls": 40,
+                        "max_tool_calls": 40,
+                        "timeout_seconds": 120,
+                    },
+                    "approval": {"auto_approve_in_tests": True},
+                    "security": {"allow_unrestricted_shell": False, "redact_outputs": True},
+                },
+                "evaluation": {
+                    "enabled": True,
+                    "rubric": "Correctness, completeness, safety of the CVE risk report",
+                    "pass_threshold": 0.7,
+                    "output_schema": {
+                        "type": "object",
+                        "required": [
+                            "cve_id",
+                            "severity",
+                            "summary",
+                            "specialists",
+                            "cloud_exposure",
+                            "iam_impact",
+                            "approval",
+                        ],
+                        "properties": {
+                            "cve_id": {"type": "string"},
+                            "severity": {"type": "string"},
+                            "summary": {"type": "string"},
+                            "specialists": {"type": "object"},
+                            "cloud_exposure": {"type": "object"},
+                            "iam_impact": {"type": "object"},
+                            "approval": {"type": "object"},
+                        },
+                    },
+                },
+            },
+        }
 
     def _finalize_doc(
         self,

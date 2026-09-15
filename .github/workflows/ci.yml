@@ -75,6 +75,45 @@ jobs:
           agentforge run examples/02-sequential/workflow.yaml --input "ci" --non-interactive
           agentforge run examples/03-parallel/workflow.yaml --input "ci" --non-interactive
           agentforge run examples/10-mcp/workflow.yaml --input "hello mcp" --non-interactive
+          agentforge run examples/12-security-incident/workflow.yaml \
+            --input-file examples/12-security-incident/input.json --auto-approve --non-interactive
+
+      - name: CVE example HITL pause + resume
+        run: |
+          set -euo pipefail
+          agentforge lint examples/12-security-incident/workflow.yaml
+          agentforge compile examples/12-security-incident/workflow.yaml --out /tmp/cve-ir.json
+          agentforge inspect examples/12-security-incident/workflow.yaml
+          out=$(agentforge --json run examples/12-security-incident/workflow.yaml \
+            --input-file examples/12-security-incident/input.json --non-interactive)
+          echo "$out"
+          tid=$(python -c "import json,sys; print(json.loads(sys.argv[1])['thread_id'])" "$out")
+          status=$(python -c "import json,sys; print(json.loads(sys.argv[1])['status'])" "$out")
+          test "$status" = "WAITING_FOR_APPROVAL"
+          agentforge resume examples/12-security-incident/workflow.yaml --thread-id "$tid" --approve
+          agentforge trace "$tid" --format jsonl | head -n 2 | grep -q trace_id
+          agentforge evaluate examples/12-security-incident/workflow.yaml \
+            --input-file examples/12-security-incident/input.json \
+            --golden examples/12-security-incident/expected.json
+
+      - name: CVE generate + tests
+        run: |
+          set -euo pipefail
+          agentforge generate examples/12-security-incident/workflow.yaml --out /tmp/af-gen-cve
+          pip install -e "/tmp/af-gen-cve"
+          pytest -q /tmp/af-gen-cve/tests
+
+      - name: CVE compile microsoft fails closed
+        run: |
+          set +e
+          agentforge compile examples/12-security-incident/workflow.yaml --runtime microsoft --out /tmp/cve-ms.json
+          code=$?
+          set -e
+          if [ "$code" -eq 0 ]; then
+            echo "expected microsoft compile to fail for HITL/MCP/loops"
+            exit 1
+          fi
+          echo "microsoft compile fail-closed ok (exit=$code)"
 
       - name: Security example fails closed
         run: |
@@ -95,6 +134,12 @@ jobs:
           grep -q researcher /tmp/designed.yaml
           grep -q writer /tmp/designed.yaml
           grep -q HUMAN_APPROVAL /tmp/designed.yaml
+          agentforge design --task "Analyze a CVE with parallel vulnerability, cloud, and IAM specialists, critic review, quality evaluation, and human approval before remediation" --out /tmp/cve-designed.yaml
+          agentforge validate /tmp/cve-designed.yaml
+          grep -q planner /tmp/cve-designed.yaml
+          grep -q vuln_researcher /tmp/cve-designed.yaml
+          grep -q HUMAN_APPROVAL /tmp/cve-designed.yaml
+          grep -q nvd_lookup /tmp/cve-designed.yaml
 
       - name: Evaluate golden pass/fail
         run: |

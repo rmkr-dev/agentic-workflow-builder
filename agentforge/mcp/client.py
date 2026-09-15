@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import sys
+from pathlib import Path
 from typing import Any
 
 from agentforge.schema import MCPServerSpec
@@ -128,12 +130,37 @@ class MCPClient:
             ) from exc
 
         env = {**os.environ, **(server.env or {})}
+        command, args = self._resolve_stdio_command(server)
         params = StdioServerParameters(
-            command=server.command or "python",
-            args=list(server.args or []),
+            command=command,
+            args=args,
             env=env,
         )
         return stdio_client(params), ClientSession
+
+    @staticmethod
+    def _resolve_stdio_command(server: MCPServerSpec) -> tuple[str, list[str]]:
+        """Resolve MCP stdio scripts relative to cwd, workflow-adjacent paths, and repo root."""
+        command = server.command or sys.executable or "python"
+        args = list(server.args or [])
+        repo_root = Path(__file__).resolve().parents[2]
+        resolved_args: list[str] = []
+        for arg in args:
+            path = Path(arg)
+            if path.suffix.lower() != ".py" or path.is_file():
+                resolved_args.append(arg)
+                continue
+            candidates = [
+                Path.cwd() / arg,
+                repo_root / arg,
+                repo_root / "examples" / Path(arg).name,
+                Path.cwd().parent / arg,
+            ]
+            hit = next((c for c in candidates if c.is_file()), None)
+            resolved_args.append(str(hit.resolve()) if hit else arg)
+        if command in {"python", "python3"}:
+            command = sys.executable or command
+        return command, resolved_args
 
     async def _stdio_list_tools(self, server: MCPServerSpec) -> list[dict[str, Any]]:
         stdio_cm, ClientSession = await self._stdio_session(server)

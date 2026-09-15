@@ -1,0 +1,14 @@
+{
+  "cves": {
+    "CVE-2024-3094": {
+      "cve_id": "CVE-2024-3094",
+      "title": "XZ Utils malicious backdoor in liblzma",
+      "severity": "CRITICAL",
+      "cvss": 10.0,
+      "published": "2024-03-29",
+      "description": "Malicious code in xz-utils 5.6.0/5.6.1 can intercept sshd authentication on some Linux distributions.",
+      "patch": "Use a non-backdoored xz-utils release and rebuild sshd.",
+      "references": ["https://nvd.nist.gov/vuln/detail/CVE-2024-3094"]
+    }
+  }
+}

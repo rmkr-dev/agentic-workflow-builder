@@ -23,10 +23,16 @@ agentforge export examples/01-single/workflow.yaml --format json --out ir.json
 
 ```bash
 agentforge run examples/01-single/workflow.yaml --input "Hello" --non-interactive
-# Capture thread_id from JSON for inspect/trace/resume:
-agentforge --json run examples/09-hitl-evaluator/workflow.yaml --input "draft" --non-interactive
+# Structured JSON input (CVE example):
+agentforge run examples/12-security-incident/workflow.yaml \
+  --input-file examples/12-security-incident/input.json --auto-approve --non-interactive
+# Capture thread_id from JSON for inspect/trace/resume. HITL does **not**
+# auto-approve unless you pass --auto-approve:
+agentforge --json run examples/12-security-incident/workflow.yaml \
+  --input-file examples/12-security-incident/input.json --non-interactive
+agentforge inspect examples/12-security-incident/workflow.yaml
 agentforge inspect <thread_id>
-agentforge resume examples/09-hitl-evaluator/workflow.yaml --thread-id <id> --approve
+agentforge resume examples/12-security-incident/workflow.yaml --thread-id <id> --approve
 ```
 
 ## Trace (ASCII or JSONL)
@@ -43,8 +49,11 @@ Multi-intent tasks compose (research + write + approval keep all implied agents)
 
 ```bash
 agentforge design --task "Research then write a summary with human approval" --out workflow.yaml
+agentforge design --task "Analyze a CVE with parallel vulnerability, cloud, and IAM specialists, critic review, quality evaluation, and human approval before remediation" --out cve.yaml
 agentforge validate workflow.yaml
 ```
+
+See [`examples/12-security-incident/README.md`](../examples/12-security-incident/README.md) for the full authoring → generate loop.
 
 ## Evaluate
 
@@ -85,6 +94,19 @@ agentforge --json doctor --full
 pip install -e ".[dev]"   # includes mcp
 agentforge validate examples/10-mcp/workflow.yaml
 agentforge run examples/10-mcp/workflow.yaml --input "hello mcp" --non-interactive
+```
+
+## Security incident (full flow)
+
+```bash
+agentforge validate examples/12-security-incident/workflow.yaml
+agentforge lint examples/12-security-incident/workflow.yaml
+agentforge compile examples/12-security-incident/workflow.yaml
+agentforge inspect examples/12-security-incident/workflow.yaml
+agentforge run examples/12-security-incident/workflow.yaml \
+  --input-file examples/12-security-incident/input.json --auto-approve --non-interactive
+agentforge evaluate examples/12-security-incident/workflow.yaml \
+  --input-file examples/12-security-incident/input.json
 ```
 
 ## Security fail-closed demo

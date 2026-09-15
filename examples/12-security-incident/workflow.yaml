@@ -1,0 +1,268 @@
+# Canonical AgentForge spec: CVE / security-incident analysis pipeline.
+#
+# This is the complicated real-world example: planner → parallel specialists
+# (NVD + cloud + IAM) → join → MCP ticket note → critic/reflection loop →
+# structured report → evaluator → human approval → finalizer.
+#
+# Run from the repository root (recommended) or this directory.
+# No live API keys are required (mock LLM + fixture tools).
+apiVersion: agentforge/v1
+kind: Workflow
+metadata:
+  name: cve-incident-pipeline
+  description: >
+    Given a CVE ID and optional cloud/IAM context, produce a structured risk
+    report. Remediation actions are only finalized after a human approval gate.
+  version: 0.1.0
+  tags: [cve, security, hitl, parallel, evaluation, mcp, real-world]
+spec:
+  pattern: hitl
+  runtime: langgraph
+
+  # Input contract used by `agentforge run --input-file input.json`
+  state_schema:
+    type: object
+    required: [cve_id]
+    properties:
+      cve_id: { type: string }
+      cloud: { type: object }
+      identity: { type: object }
+
+  agents:
+    - id: planner
+      role: planner
+      system_prompt: >
+        Decompose the CVE incident into specialist work: vulnerability research,
+        cloud exposure, and IAM impact. Do not recommend production changes.
+    - id: vuln_researcher
+      role: researcher
+      system_prompt: >
+        Interpret NVD-like lookup results. Summarize exploitability and patches.
+        Never invent CVSS scores that contradict the tool output.
+      tools: [nvd_lookup]
+    - id: cloud_analyst
+      role: analyst
+      system_prompt: >
+        Assess blast radius from the cloud inventory in the structured payload.
+      tools: [cloud_exposure]
+    - id: iam_analyst
+      role: analyst
+      system_prompt: >
+        Assess identity/IAM impact. Flag admin-equivalent roles.
+      tools: [iam_impact]
+    - id: critic
+      role: critic
+      system_prompt: >
+        Critique the joined specialist notes for gaps, over-confidence, and missing evidence.
+    - id: finalizer
+      role: writer
+      system_prompt: >
+        Write the final analyst narrative. Remediation actions must respect approval state.
+      tools: [assemble_cve_report]
+
+  tools:
+    # Offline NVD-like catalog (see agentforge.tools.fixtures). Optional live HTTP:
+    #   AGENTFORGE_NVD_HTTP=1
+    # Extra records: AGENTFORGE_NVD_FIXTURE=examples/12-security-incident/nvd_catalog.json
+    - id: nvd_lookup
+      kind: deterministic
+      deterministic_fn: nvd_lookup
+      description: NVD-like CVE lookup (fixture catalog; optional allowlisted HTTP)
+      permissions: {}
+    - id: cloud_exposure
+      kind: deterministic
+      deterministic_fn: cloud_exposure
+      description: Cloud inventory blast-radius analysis
+      permissions: {}
+    - id: iam_impact
+      kind: deterministic
+      deterministic_fn: iam_impact
+      description: IAM / identity impact analysis
+      permissions: {}
+    - id: assemble_cve_report
+      kind: deterministic
+      deterministic_fn: assemble_cve_report
+      description: Join artifacts into a JSON risk report (remediation only if approved)
+      permissions: {}
+    - id: ticket_note
+      kind: deterministic
+      deterministic_fn: ticket_note
+      description: Deterministic incident ticket note (offline)
+      permissions: {}
+    # Optional live MCP grant (same echo server as examples/10-mcp).
+    # Swap ticket_note's tool to mcp_echo to exercise stdio MCP in this graph.
+    - id: mcp_echo
+      kind: mcp
+      description: MCP echo used as an incident ticket note (optional; see examples/10-mcp)
+      mcp_server: echo_server
+      mcp_tool: echo
+      permissions: {}
+    # How to plug a real Python tool later (not invoked in this graph):
+    # - id: my_nvd
+    #   kind: python
+    #   entrypoint: my_pkg.nvd:lookup
+    #   permissions: {}
+    # REST (only if you allow network — keep hosts allowlisted):
+    # - id: nvd_http
+    #   kind: rest
+    #   url: https://services.nvd.nist.gov/rest/json/cves/2.0
+    #   permissions: { allow_network: true, allowed_hosts: [services.nvd.nist.gov] }
+
+  mcp_servers:
+    - id: echo_server
+      transport: stdio
+      command: python
+      args: [examples/mcp_echo_server.py]
+      granted_tools: [echo]
+
+  nodes:
+    - id: start
+      type: START
+    - id: planner
+      type: AGENT
+      agent: planner
+    - id: fanout
+      type: PARALLEL
+      parallel_of: [nvd_lookup, cloud_exposure, iam_impact]
+    - id: nvd_lookup
+      type: TOOL
+      tool: nvd_lookup
+    - id: vuln_researcher
+      type: AGENT
+      agent: vuln_researcher
+    - id: cloud_exposure
+      type: TOOL
+      tool: cloud_exposure
+    - id: cloud_analyst
+      type: AGENT
+      agent: cloud_analyst
+    - id: iam_impact
+      type: TOOL
+      tool: iam_impact
+    - id: iam_analyst
+      type: AGENT
+      agent: iam_analyst
+    - id: join
+      type: JOIN
+      join_of: [vuln_researcher, cloud_analyst, iam_analyst]
+    - id: ticket_note
+      type: TOOL
+      tool: ticket_note
+    - id: critic
+      type: AGENT
+      agent: critic
+    - id: loop
+      type: LOOP
+      loop_body: critic
+      loop_condition: needs_revision
+      max_iterations: 2
+    - id: draft_report
+      type: TOOL
+      tool: assemble_cve_report
+    - id: evaluate
+      type: EVALUATOR
+      evaluator_rubric: Completeness, evidence, safety, no secret leakage
+    - id: approve
+      type: HUMAN_APPROVAL
+      approval_message: >
+        Approve finalizing remediation actions for this CVE risk report?
+        Reject to keep remediation_actions empty.
+    - id: finalizer
+      type: AGENT
+      agent: finalizer
+    - id: emit_report
+      type: TOOL
+      tool: assemble_cve_report
+    - id: end
+      type: END
+
+  edges:
+    - source: start
+      target: planner
+    - source: planner
+      target: fanout
+    - source: fanout
+      target: nvd_lookup
+    - source: nvd_lookup
+      target: vuln_researcher
+    - source: fanout
+      target: cloud_exposure
+    - source: cloud_exposure
+      target: cloud_analyst
+    - source: fanout
+      target: iam_impact
+    - source: iam_impact
+      target: iam_analyst
+    - source: vuln_researcher
+      target: join
+    - source: cloud_analyst
+      target: join
+    - source: iam_analyst
+      target: join
+    - source: join
+      target: ticket_note
+    - source: ticket_note
+      target: critic
+    - source: critic
+      target: loop
+    - source: loop
+      target: critic
+      label: revise
+    - source: loop
+      target: draft_report
+      label: done
+    - source: draft_report
+      target: evaluate
+    - source: evaluate
+      target: approve
+    - source: approve
+      target: finalizer
+    - source: finalizer
+      target: emit_report
+    - source: emit_report
+      target: end
+
+  policies:
+    tool:
+      default_deny: true
+      allowed_tools: [nvd_lookup, cloud_exposure, iam_impact, assemble_cve_report, ticket_note, mcp_echo]
+      require_explicit_grants: true
+    budget:
+      max_steps: 80
+      max_llm_calls: 40
+      max_tool_calls: 40
+      timeout_seconds: 120
+    approval:
+      auto_approve_in_tests: true
+    security:
+      allow_unrestricted_shell: false
+      redact_outputs: true
+      block_secrets_in_prompts: true
+
+  guardrails:
+    - id: no-secrets
+      rules: ["sk-[A-Za-z0-9]{10,}", "(?i)password\\s*="]
+      on_match: block
+      message: Secret-like token blocked
+
+  evaluation:
+    enabled: true
+    rubric: Completeness, evidence, safety of the CVE risk report
+    pass_threshold: 0.7
+    metrics: [correctness, safety]
+    golden_path: expected.json
+    output_schema:
+      type: object
+      required: [cve_id, severity, summary, specialists, cloud_exposure, iam_impact, approval]
+      properties:
+        cve_id: { type: string }
+        severity: { type: string }
+        summary: { type: string }
+        specialists: { type: object }
+        cloud_exposure: { type: object }
+        iam_impact: { type: object }
+        approval: { type: object }
+
+  observability:
+    emit_events: true
+    sqlite_path: .agentforge/events.db
