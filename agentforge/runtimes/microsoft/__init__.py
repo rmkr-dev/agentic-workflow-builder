@@ -15,7 +15,7 @@ from agentforge.runtimes.base import (
     RuntimeAdapter,
     UnsupportedCapabilityError,
 )
-from agentforge.runtimes.base.helpers import SQLiteRunStore, mock_llm_respond, new_thread_id
+from agentforge.runtimes.base.helpers import SQLiteRunStore, llm_respond, new_thread_id
 from agentforge.schema import NodeType, WorkflowPattern
 
 
@@ -166,11 +166,11 @@ class MicrosoftAdapter(RuntimeAdapter):
         user_input = str(request.input.get("input", request.input.get("query", "")))
         outputs: list[str] = []
         for agent_id, agent in ir.agents.items():
-            outputs.append(mock_llm_respond(agent.system_prompt, user_input, agent_id=agent_id))
+            outputs.append(llm_respond(agent.system_prompt, user_input, agent_id=agent_id))
         if not outputs:
             for n in ir.nodes:
                 if n.type == NodeType.AGENT:
-                    outputs.append(mock_llm_respond("assistant", user_input, agent_id=n.id))
+                    outputs.append(llm_respond("assistant", user_input, agent_id=n.id))
 
         if ir.pattern in {WorkflowPattern.PARALLEL, WorkflowPattern.FAN_OUT_FAN_IN}:
             final = " | ".join(outputs)

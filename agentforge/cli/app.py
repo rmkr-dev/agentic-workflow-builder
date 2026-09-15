@@ -1,9 +1,7 @@
-"""AgentForge CLI — Typer + Rich."""
+"""AgentForge CLI - Typer + Rich."""
 
 from __future__ import annotations
 
-import json
-import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -24,17 +22,85 @@ from agentforge.observability import format_trace_tree
 from agentforge.parser.loader import SpecLoader
 from agentforge.runtimes import get_adapter
 from agentforge.runtimes.base import RunRequest
+from agentforge.runtimes.base.helpers import detect_llm_mode, resolve_llm_config
 from agentforge.sdk import WorkflowCompiler
 from agentforge.validator.engine import ValidationEngine
 
+GLOBAL_FLAGS = frozenset({"--json", "--quiet", "--verbose", "--non-interactive"})
+KNOWN_COMMANDS = frozenset(
+    {
+        "version",
+        "init",
+        "validate",
+        "lint",
+        "compile",
+        "generate",
+        "test",
+        "run",
+        "resume",
+        "inspect",
+        "trace",
+        "evaluate",
+        "export",
+        "design",
+        "doctor",
+        "publish",
+    }
+)
+
+
+def _configure_stdio() -> None:
+    """Avoid UnicodeEncodeError on Windows cp1252 consoles (e.g. help arrows)."""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            try:
+                reconfigure(encoding="utf-8", errors="replace")
+            except Exception:
+                pass
+
+
+def normalize_cli_argv(argv: list[str]) -> list[str]:
+    """Move global flags that appear after a subcommand to before it.
+
+    Typer/Click only bind callback options before the subcommand. Users often
+    write ``agentforge run ... --non-interactive``; rewrite that to
+    ``agentforge --non-interactive run ...``.
+    """
+    if not argv:
+        return argv
+    cmd_idx = next((i for i, tok in enumerate(argv) if tok in KNOWN_COMMANDS), None)
+    if cmd_idx is None:
+        return argv
+    before = argv[:cmd_idx]
+    cmd = argv[cmd_idx]
+    rest = argv[cmd_idx + 1 :]
+    moved: list[str] = []
+    kept: list[str] = []
+    for tok in rest:
+        name = tok.split("=", 1)[0] if tok.startswith("--") and "=" in tok else tok
+        if name in GLOBAL_FLAGS:
+            moved.append(tok)
+        else:
+            kept.append(tok)
+    # Preserve already-present globals in ``before``; append newly moved ones
+    return before + moved + [cmd] + kept
+
+
+_configure_stdio()
+
 app = typer.Typer(
     name="agentforge",
-    help="Compile agentic intent into executable workflows.",
+    help=(
+        "Compile agentic intent into executable workflows.\n\n"
+        "Global flags (--json, --quiet, --verbose, --non-interactive) may appear "
+        "before or after the subcommand."
+    ),
     add_completion=False,
     no_args_is_help=True,
 )
-console = Console()
-err_console = Console(stderr=True)
+console = Console(legacy_windows=False)
+err_console = Console(stderr=True, legacy_windows=False)
 
 
 def _opts(
@@ -60,13 +126,38 @@ def _load_ir(path: Path):
     return SpecLoader().load(path)
 
 
+def _mode_banner() -> dict[str, Any]:
+    mode = detect_llm_mode()
+    cfg = resolve_llm_config()
+    return {
+        "mode": mode,
+        "provider": cfg.get("provider"),
+        "model": cfg.get("model"),
+        "mock": mode == "mock",
+    }
+
+
+def _emit_mode(*, json_out: bool, quiet: bool) -> dict[str, Any]:
+    info = _mode_banner()
+    if quiet:
+        return info
+    if json_out:
+        return info
+    console.print(f"mode={info['mode']} provider={info['provider']} model={info['model']}")
+    return info
+
+
 @app.callback()
 def main_callback(
     ctx: typer.Context,
     json_output: bool = typer.Option(False, "--json", help="Emit JSON"),
     quiet: bool = typer.Option(False, "--quiet", help="Minimal output"),
     verbose: bool = typer.Option(False, "--verbose", help="Verbose output"),
-    non_interactive: bool = typer.Option(False, "--non-interactive", help="Never prompt"),
+    non_interactive: bool = typer.Option(
+        False,
+        "--non-interactive",
+        help="Never prompt (accepted before or after the subcommand)",
+    ),
 ) -> None:
     ctx.ensure_object(dict)
     ctx.obj.update(
@@ -152,7 +243,7 @@ def compile(
     runtime: Optional[str] = typer.Option(None, "--runtime"),
     out: Path = typer.Option(Path(".agentforge/ir.json"), "--out"),
 ) -> None:
-    """Compile spec → Workflow IR and bind a runtime."""
+    """Compile spec to Workflow IR and bind a runtime."""
     compiler = WorkflowCompiler(runtime=runtime or "langgraph")
     ir = compiler.compile(path)
     if runtime:
@@ -164,7 +255,7 @@ def compile(
     if ctx.obj["json"]:
         _print(payload, json_out=True, quiet=False)
     else:
-        console.print(f"[green]Compiled[/green] {path} → {out} ({ir.runtime}, {len(ir.nodes)} nodes)")
+        console.print(f"[green]Compiled[/green] {path} -> {out} ({ir.runtime}, {len(ir.nodes)} nodes)")
 
 
 @app.command()
@@ -197,7 +288,7 @@ def test_cmd(
         console.print(report.format())
         raise typer.Exit(1)
     adapter = get_adapter(ir.runtime)
-    result = adapter.run(ir, RunRequest(input={"input": "test", "auto_approve": True, "route": "done"}))
+    result = adapter.run(ir, RunRequest(input={"input": "test", "auto_approve": True}))
     ok = result.status.value in {"COMPLETED", "WAITING_FOR_APPROVAL", "WAITING_FOR_INPUT"}
     if generate_first:
         out = Path(".agentforge/test_gen") / ir.name
@@ -223,6 +314,7 @@ def run(
     dry_run: bool = typer.Option(False, "--dry-run"),
 ) -> None:
     """Execute a workflow."""
+    mode_info = _emit_mode(json_out=ctx.obj["json"], quiet=ctx.obj["quiet"])
     ir = _load_ir(path)
     rt = runtime or ir.runtime
     adapter = get_adapter(rt)
@@ -230,12 +322,14 @@ def run(
     result = adapter.run(
         ir,
         RunRequest(
-            input={"input": input_text, "auto_approve": True, "route": "done"},
+            input={"input": input_text, "auto_approve": True},
             thread_id=thread_id,
             dry_run=dry_run,
         ),
     )
     payload = result.model_dump()
+    payload["mode"] = mode_info["mode"]
+    payload["llm"] = mode_info
     if ctx.obj["json"]:
         _print(payload, json_out=True, quiet=False)
     else:
@@ -374,12 +468,14 @@ def doctor(
     full: bool = typer.Option(False, "--full", help="Run extended checks"),
 ) -> None:
     """Environment and installation diagnostics."""
+    mode_info = _emit_mode(json_out=ctx.obj["json"], quiet=ctx.obj["quiet"])
     checks: list[dict[str, Any]] = []
 
     def add(name: str, ok: bool, detail: str = "") -> None:
         checks.append({"name": name, "ok": ok, "detail": detail})
 
     add("python", sys.version_info >= (3, 11), sys.version.split()[0])
+    add("llm_mode", True, mode_info["mode"])
     try:
         import pydantic
 
@@ -397,13 +493,11 @@ def doctor(
 
         add("microsoft-agent-framework", True, "installed")
     except Exception:
-        add("microsoft-agent-framework", False, "optional — pip install agentforge[microsoft]")
+        add("microsoft-agent-framework", False, "optional - pip install agentforge[microsoft]")
 
     add("templates", (Path(__file__).resolve().parents[2] / "templates" / "generated-project").exists())
     if full:
         # compile + run a tiny inline workflow
-        from agentforge.schema import WorkflowDocument
-
         tiny = {
             "apiVersion": "agentforge/v1",
             "kind": "Workflow",
@@ -444,7 +538,11 @@ def doctor(
     ok = all(c["ok"] for c in hard if c["name"] != "langgraph-run" or full)
 
     if ctx.obj["json"]:
-        _print({"ok": ok, "checks": checks, "version": __version__}, json_out=True, quiet=False)
+        _print(
+            {"ok": ok, "checks": checks, "version": __version__, "mode": mode_info["mode"], "llm": mode_info},
+            json_out=True,
+            quiet=False,
+        )
     else:
         table = Table(title=f"AgentForge doctor v{__version__}")
         table.add_column("Check")
@@ -478,8 +576,10 @@ def publish(
         console.print(f"[green]Published[/green] {tarball}")
 
 
-def main() -> None:
-    app()
+def main(argv: list[str] | None = None) -> None:
+    args = list(sys.argv[1:] if argv is None else argv)
+    normalized = normalize_cli_argv(args)
+    app(args=normalized, prog_name="agentforge")
 
 
 if __name__ == "__main__":

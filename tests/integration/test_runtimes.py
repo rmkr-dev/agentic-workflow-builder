@@ -31,12 +31,26 @@ def test_langgraph_run_examples(example: str):
     adapter.compile(ir)
     result = adapter.run(
         ir,
-        RunRequest(input={"input": f"run {example}", "auto_approve": True, "route": "done"}),
+        RunRequest(input={"input": f"run {example}", "auto_approve": True}),
     )
     assert result.status.value in {"COMPLETED", "WAITING_FOR_APPROVAL", "WAITING_FOR_INPUT"}
     assert result.thread_id
     view = adapter.inspect(result.thread_id)
     assert view.thread_id == result.thread_id
+
+
+def test_langgraph_supervisor_workers():
+    ir = SpecLoader().load(EXAMPLES / "04-supervisor" / "workflow.yaml")
+    adapter = get_adapter("langgraph")
+    adapter.compile(ir)
+    result = adapter.run(
+        ir,
+        RunRequest(input={"input": "research and write", "auto_approve": True}),
+    )
+    assert result.status.value == "COMPLETED"
+    outs = result.output.get("node_outputs") or {}
+    assert "worker_research" in outs
+    assert "worker_write" in outs
 
 
 def test_langgraph_conditional():

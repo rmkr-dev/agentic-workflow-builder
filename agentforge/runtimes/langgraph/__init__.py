@@ -20,13 +20,17 @@ from agentforge.runtimes.base import (
     UnsupportedCapabilityError,
 )
 from agentforge.runtimes.base.helpers import (
+    DEFAULT_MOCK_SUPERVISOR_HOPS,
     SQLiteRunStore,
+    SUPERVISOR_ROLES,
     apply_transform,
     eval_condition,
-    mock_llm_respond,
+    llm_respond,
+    mock_supervisor_route,
     new_thread_id,
     redact_secrets,
     resolve_llm_config,
+    supervisor_worker_ids,
 )
 from agentforge.schema import NodeType
 from agentforge.security.guardrails import GuardrailEngine
@@ -112,17 +116,19 @@ class LangGraphAdapter(RuntimeAdapter):
         graph = StateGraph(GraphState)
         node_map = ir.node_map()
 
+        workers = supervisor_worker_ids(ir)
+        max_supervisor_hops = min(
+            DEFAULT_MOCK_SUPERVISOR_HOPS,
+            max(1, int(getattr(ir.policies.budget, "max_steps", 100) or 100)),
+        )
+
         def make_agent_node(node_id: str, agent_id: str):
             def _node(state: GraphState) -> dict[str, Any]:
                 agent = ir.agents.get(agent_id)
                 system = agent.system_prompt if agent else f"You are {agent_id}."
-                llm = resolve_llm_config(agent.llm) if agent else {"mock": True}
+                llm = resolve_llm_config(agent.llm) if agent else resolve_llm_config()
                 user_input = str(state.get("input", ""))
-                if llm.get("mock"):
-                    text = mock_llm_respond(system, user_input, agent_id=agent_id)
-                else:
-                    text = mock_llm_respond(system, user_input, agent_id=agent_id)
-                    # Real providers can be wired via env; mock remains default for CI
+                text = llm_respond(system, user_input, agent_id=agent_id, config=llm)
                 text = redact_secrets(text) if ir.policies.security.redact_outputs else text
                 decision = guardrails.check(text)
                 if decision.action == "block":
@@ -134,11 +140,41 @@ class LangGraphAdapter(RuntimeAdapter):
                 policies.check_budget_step()
                 outs = dict(state.get("node_outputs") or {})
                 outs[node_id] = text
-                return {
+                result: dict[str, Any] = {
                     "output": text,
                     "messages": [{"role": "assistant", "agent": agent_id, "content": text}],
                     "node_outputs": outs,
+                    "meta": {
+                        **(state.get("meta") or {}),
+                        "llm_mode": llm.get("mode", "mock"),
+                    },
                 }
+                role = str(getattr(agent, "role", "") or "").lower() if agent else ""
+                is_supervisor = role in SUPERVISOR_ROLES or (
+                    ir.pattern.value == "supervisor" and agent_id == (next(iter(ir.agents), None))
+                )
+                if is_supervisor and workers:
+                    meta = dict(result["meta"])
+                    visits = int(meta.get("supervisor_visits") or 0) + 1
+                    # Only honor the original caller-requested route, not the last hop
+                    requested = meta.get("requested_route")
+                    incoming = str(requested) if requested not in (None, "") else ""
+                    route = mock_supervisor_route(
+                        workers=workers,
+                        node_outputs=outs,
+                        user_input=user_input,
+                        supervisor_visits=visits,
+                        max_hops=max_supervisor_hops,
+                        forced_route=incoming or None,
+                    )
+                    meta["supervisor_visits"] = visits
+                    meta["last_route"] = route
+                    result["route"] = route
+                    result["meta"] = meta
+                    result["output"] = f"{text} [route={route}]"
+                    outs[node_id] = result["output"]
+                    result["node_outputs"] = outs
+                return result
 
             return _node
 
@@ -305,11 +341,16 @@ class LangGraphAdapter(RuntimeAdapter):
                             ok = eval_condition(node.condition_expr, dict(state))
                             if "true" in route_map and "false" in route_map:
                                 return "true" if ok else "false"
-                        # supervisor style: use state route
-                        preferred = str(state.get("route") or "done")
+                        # supervisor style: use state route set by supervisor agent
+                        preferred = str(state.get("route") or "")
                         if preferred in route_map:
                             return preferred
-                        # default first route
+                        # Prefer a pending worker over immediate done when unset
+                        non_done = [k for k in route_map if k != "done"]
+                        if non_done:
+                            return non_done[0]
+                        if "done" in route_map:
+                            return "done"
                         return next(iter(route_map))
 
                     return _route
@@ -373,11 +414,13 @@ class LangGraphAdapter(RuntimeAdapter):
         emitter.emit(thread_id, "run_started", {"input": request.input})
 
         config = {"configurable": {"thread_id": thread_id}}
+        requested_route = request.input.get("route")
         state_in: dict[str, Any] = {
             "input": str(request.input.get("input", request.input.get("query", ""))),
             "output": "",
             "messages": [],
-            "route": str(request.input.get("route", "done")),
+            # Empty default lets supervisor/mock router choose workers first
+            "route": str(requested_route) if requested_route not in (None, "") else "",
             "needs_revision": bool(request.input.get("needs_revision", False)),
             "continue_loop": bool(request.input.get("continue", False)),
             "loop_count": 0,
@@ -387,6 +430,7 @@ class LangGraphAdapter(RuntimeAdapter):
             "node_outputs": {},
             "meta": {
                 "auto_approve": request.input.get("auto_approve", True),
+                "requested_route": requested_route,
                 **{k: v for k, v in request.input.items() if k not in {"input", "query"}},
             },
         }

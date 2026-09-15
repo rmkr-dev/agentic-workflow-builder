@@ -28,6 +28,20 @@ agentforge run examples/01-single/workflow.yaml --input "Hello"
 agentforge generate examples/01-single/workflow.yaml --out ./generated/single-agent
 ```
 
+### LLM mode (mock vs live)
+
+By default AgentForge runs in **mock** mode (`AGENTFORGE_LLM_MOCK=1`) so CI and local
+examples stay deterministic. To use a live OpenAI-compatible provider:
+
+```bash
+export AGENTFORGE_LLM_MOCK=0
+export AGENTFORGE_LLM_API_KEY=sk-...
+# optional: AGENTFORGE_LLM_BASE_URL, AGENTFORGE_LLM_MODEL, AGENTFORGE_LLM_PROVIDER
+agentforge run examples/01-single/workflow.yaml --input "Hello"
+```
+
+`run` and `doctor` always print `mode=mock|live` (and include it in `--json` output).
+See `.env.example` for the full variable list. `OPENAI_API_KEY` is accepted as a fallback.
 ### SDK
 
 ```python
@@ -52,6 +66,14 @@ agentforge inspect | trace | evaluate | export | design | doctor | publish
 ```
 
 Global flags: `--json` `--quiet` `--verbose` `--non-interactive`
+
+These global flags may appear **before or after** the subcommand:
+
+```bash
+agentforge --non-interactive run examples/01-single/workflow.yaml
+agentforge run examples/01-single/workflow.yaml --non-interactive
+agentforge --json doctor
+```
 
 ## Workflow patterns
 

@@ -50,7 +50,7 @@ class DiagnosticReport(BaseModel):
 
     def format(self) -> str:
         if not self.diagnostics:
-            return "OK — no diagnostics"
+            return "OK - no diagnostics"
         return "\n".join(d.format_line() for d in self.diagnostics)
 
     def to_dict(self) -> dict[str, Any]:

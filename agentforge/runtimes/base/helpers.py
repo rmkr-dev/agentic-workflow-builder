@@ -17,25 +17,57 @@ SECRET_PATTERNS = [
     re.compile(r"sk-[A-Za-z0-9]{20,}"),
 ]
 
+SUPERVISOR_ROLES = frozenset({"supervisor", "orchestrator", "manager", "router"})
+DEFAULT_MOCK_SUPERVISOR_HOPS = 8
+
 
 def new_thread_id() -> str:
     return f"run-{uuid.uuid4().hex[:12]}"
 
 
-def resolve_llm_config(agent_llm: Any) -> dict[str, Any]:
+def detect_llm_mode() -> str:
+    """Return ``mock`` or ``live`` based on env (default mock for CI)."""
+    forced_mock = os.environ.get("AGENTFORGE_LLM_MOCK", "1").strip().lower()
+    if forced_mock in {"1", "true", "yes", "on"}:
+        return "mock"
+    api_key = (
+        os.environ.get("AGENTFORGE_LLM_API_KEY", "").strip()
+        or os.environ.get("OPENAI_API_KEY", "").strip()
+    )
+    return "live" if api_key else "mock"
+
+
+def resolve_llm_config(agent_llm: Any = None) -> dict[str, Any]:
     """Resolve provider-neutral LLM settings from environment only."""
-    model = os.environ.get(getattr(agent_llm, "model_env", "AGENTFORGE_LLM_MODEL")) or agent_llm.model
-    api_key = os.environ.get(getattr(agent_llm, "api_key_env", "AGENTFORGE_LLM_API_KEY"), "")
-    base_url = os.environ.get(getattr(agent_llm, "base_url_env", "AGENTFORGE_LLM_BASE_URL"), "")
-    provider = os.environ.get("AGENTFORGE_LLM_PROVIDER", agent_llm.provider)
-    use_mock = os.environ.get("AGENTFORGE_LLM_MOCK", "1") == "1" or not api_key
+    model_env = getattr(agent_llm, "model_env", "AGENTFORGE_LLM_MODEL") if agent_llm else "AGENTFORGE_LLM_MODEL"
+    key_env = getattr(agent_llm, "api_key_env", "AGENTFORGE_LLM_API_KEY") if agent_llm else "AGENTFORGE_LLM_API_KEY"
+    base_env = getattr(agent_llm, "base_url_env", "AGENTFORGE_LLM_BASE_URL") if agent_llm else "AGENTFORGE_LLM_BASE_URL"
+    default_model = getattr(agent_llm, "model", "gpt-4o-mini") if agent_llm else "gpt-4o-mini"
+    default_provider = getattr(agent_llm, "provider", "openai") if agent_llm else "openai"
+    temperature = getattr(agent_llm, "temperature", 0.0) if agent_llm else 0.0
+    max_tokens = getattr(agent_llm, "max_tokens", None) if agent_llm else None
+
+    model = os.environ.get(model_env) or default_model
+    api_key = os.environ.get(key_env, "").strip() or os.environ.get("OPENAI_API_KEY", "").strip()
+    base_url = os.environ.get(base_env, "").strip()
+    provider = os.environ.get("AGENTFORGE_LLM_PROVIDER", default_provider)
+    # Default mock=1 keeps CI deterministic; live requires MOCK disabled + API key
+    forced_mock = os.environ.get("AGENTFORGE_LLM_MOCK", "1").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    mode = "mock" if forced_mock or not api_key else "live"
     return {
         "provider": provider,
         "model": model,
         "api_key": api_key,
         "base_url": base_url,
-        "temperature": getattr(agent_llm, "temperature", 0.0),
-        "mock": use_mock,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+        "mock": mode == "mock",
+        "mode": mode,
     }
 
 
@@ -46,6 +78,131 @@ def mock_llm_respond(system_prompt: str, user_input: str, *, agent_id: str = "ag
         snippet = snippet[:117] + "..."
     return f"[{agent_id}] {system_prompt.split('.')[0].strip()}: {snippet or 'OK'}"
 
+
+def live_llm_respond(
+    system_prompt: str,
+    user_input: str,
+    *,
+    agent_id: str = "agent",
+    config: dict[str, Any] | None = None,
+) -> str:
+    """Call an OpenAI-compatible chat completions endpoint using env credentials."""
+    import httpx
+
+    cfg = config or resolve_llm_config()
+    api_key = cfg.get("api_key") or ""
+    if not api_key:
+        raise RuntimeError("live LLM requested but no API key is configured")
+    base = (cfg.get("base_url") or "https://api.openai.com/v1").rstrip("/")
+    url = f"{base}/chat/completions"
+    payload: dict[str, Any] = {
+        "model": cfg.get("model") or "gpt-4o-mini",
+        "temperature": float(cfg.get("temperature") or 0.0),
+        "messages": [
+            {"role": "system", "content": system_prompt or f"You are {agent_id}."},
+            {"role": "user", "content": user_input or ""},
+        ],
+    }
+    if cfg.get("max_tokens"):
+        payload["max_tokens"] = int(cfg["max_tokens"])
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    with httpx.Client(timeout=60.0) as client:
+        resp = client.post(url, headers=headers, json=payload)
+        resp.raise_for_status()
+        data = resp.json()
+    try:
+        return str(data["choices"][0]["message"]["content"])
+    except (KeyError, IndexError, TypeError) as exc:
+        raise RuntimeError(f"unexpected LLM response shape: {data!r}") from exc
+
+
+def llm_respond(
+    system_prompt: str,
+    user_input: str,
+    *,
+    agent_id: str = "agent",
+    config: dict[str, Any] | None = None,
+) -> str:
+    """Dispatch to mock or live provider based on resolved config."""
+    cfg = config or resolve_llm_config()
+    if cfg.get("mock", True):
+        return mock_llm_respond(system_prompt, user_input, agent_id=agent_id)
+    return live_llm_respond(system_prompt, user_input, agent_id=agent_id, config=cfg)
+
+
+def supervisor_worker_ids(ir: Any) -> list[str]:
+    """Infer worker agent/node ids for supervisor-style graphs."""
+    nodes = list(getattr(ir, "nodes", []) or [])
+    router_targets: list[str] = []
+    for n in nodes:
+        ntype = getattr(n, "type", None)
+        ntype_val = str(getattr(ntype, "value", ntype) or "").upper()
+        if ntype_val in {"ROUTER", "CONDITION"}:
+            routes = dict(getattr(n, "routes", {}) or {})
+            for label, target in routes.items():
+                if label == "done" or target in {"end", "END"}:
+                    continue
+                if target not in router_targets:
+                    router_targets.append(target)
+    if router_targets:
+        return router_targets
+    workers: list[str] = []
+    agents = getattr(ir, "agents", {}) or {}
+    for agent_id, agent in agents.items():
+        role = str(getattr(agent, "role", "") or "").lower()
+        if role in SUPERVISOR_ROLES:
+            continue
+        workers.append(agent_id)
+    return workers
+
+
+def mock_supervisor_route(
+    *,
+    workers: list[str],
+    node_outputs: dict[str, Any],
+    user_input: str = "",
+    supervisor_visits: int = 1,
+    max_hops: int = DEFAULT_MOCK_SUPERVISOR_HOPS,
+    forced_route: str | None = None,
+) -> str:
+    """Pick next worker or ``done`` for deterministic mock supervisor routing.
+
+    Visits workers that have not yet produced outputs (keyword-biased order),
+    then finishes. Bounded by ``max_hops``.
+    """
+    if forced_route and forced_route not in {"", "auto"}:
+        # Ignore premature done on the first tick so examples invoke workers
+        if forced_route == "done" and supervisor_visits <= 1 and workers:
+            pass
+        # Ignore routes to workers that already produced output (avoids loops)
+        elif forced_route in workers and forced_route in node_outputs:
+            pass
+        elif forced_route in set(workers) | {"done"}:
+            return forced_route
+
+    if supervisor_visits > max_hops or not workers:
+        return "done"
+
+    pending = [w for w in workers if w not in node_outputs]
+    if not pending:
+        return "done"
+
+    lower = (user_input or "").lower()
+    # Keyword bias: prefer write/research workers when mentioned
+    scored: list[tuple[int, str]] = []
+    for w in pending:
+        score = 0
+        wl = w.lower()
+        if "write" in wl and any(k in lower for k in ("write", "draft", "summary", "answer")):
+            score += 2
+        if "research" in wl and any(k in lower for k in ("research", "find", "search", "look")):
+            score += 2
+        scored.append((score, w))
+    scored.sort(key=lambda t: (-t[0], workers.index(t[1]) if t[1] in workers else 0))
+    return scored[0][1]
 
 SAFE_BUILTINS: dict[str, Any] = {
     "True": True,

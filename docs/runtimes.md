@@ -24,4 +24,16 @@ Install optional extra:
 pip install 'agentforge[microsoft]'
 ```
 
+## LLM providers
+
+AgentForge resolves LLM settings from environment variables only (see `.env.example`).
+
+| Mode | When |
+|------|------|
+| `mock` (default) | `AGENTFORGE_LLM_MOCK=1` (default) **or** no API key |
+| `live` | `AGENTFORGE_LLM_MOCK=0` **and** `AGENTFORGE_LLM_API_KEY` (or `OPENAI_API_KEY`) set |
+
+Live calls use an OpenAI-compatible `/chat/completions` endpoint (`AGENTFORGE_LLM_BASE_URL` optional).
+
 AgentForge **never** silently downgrades an unsupported Microsoft feature to LangGraph.
+

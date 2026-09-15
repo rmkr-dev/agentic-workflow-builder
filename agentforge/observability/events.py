@@ -20,10 +20,10 @@ def format_trace_tree(events: list[dict[str, Any]]) -> str:
         return "(no events)"
     lines = ["run"]
     for i, ev in enumerate(events):
-        branch = "└─" if i == len(events) - 1 else "├─"
+        branch = "L-" if i == len(events) - 1 else "|-"
         payload = ev.get("payload", {})
         summary = payload.get("status") or payload.get("output") or payload
         if isinstance(summary, dict):
             summary = ", ".join(f"{k}={v}" for k, v in list(summary.items())[:3])
-        lines.append(f"  {branch} {ev.get('type')} @ {ev.get('at', '?')} — {summary}")
+        lines.append(f"  {branch} {ev.get('type')} @ {ev.get('at', '?')} - {summary}")
     return "\n".join(lines)
