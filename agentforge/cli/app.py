@@ -5,7 +5,7 @@ from __future__ import annotations
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 import typer
 import yaml
@@ -18,7 +18,7 @@ from agentforge.architect import Architect
 from agentforge.evaluation import EvaluationEngine
 from agentforge.generator.project import ProjectGenerator
 from agentforge.linter import Linter
-from agentforge.observability import format_trace_tree
+from agentforge.observability import format_trace_jsonl, format_trace_tree
 from agentforge.parser.loader import SpecLoader
 from agentforge.runtimes import get_adapter
 from agentforge.runtimes.base import RunRequest
@@ -240,7 +240,7 @@ def lint(
 def compile(
     ctx: typer.Context,
     path: Path = typer.Argument(Path("workflow.yaml")),
-    runtime: Optional[str] = typer.Option(None, "--runtime"),
+    runtime: str | None = typer.Option(None, "--runtime"),
     out: Path = typer.Option(Path(".agentforge/ir.json"), "--out"),
 ) -> None:
     """Compile spec to Workflow IR and bind a runtime."""
@@ -262,7 +262,7 @@ def compile(
 def generate(
     ctx: typer.Context,
     path: Path = typer.Argument(Path("workflow.yaml")),
-    output_dir: Optional[Path] = typer.Option(None, "--out"),
+    output_dir: Path | None = typer.Option(None, "--out"),
     runtime: str = typer.Option("langgraph", "--runtime"),
 ) -> None:
     """Generate a standalone agent project."""
@@ -280,8 +280,10 @@ def test_cmd(
     ctx: typer.Context,
     path: Path = typer.Argument(Path("workflow.yaml")),
     generate_first: bool = typer.Option(True, "--generate/--no-generate"),
+    golden: Path | None = typer.Option(None, "--golden", help="Golden-file evaluation"),
+    eval_outputs: bool = typer.Option(True, "--eval/--no-eval"),
 ) -> None:
-    """Validate, optionally generate, and run project tests."""
+    """Validate, optionally generate, evaluate, and run project tests."""
     ir = _load_ir(path)
     report = ValidationEngine().validate(ir)
     if report.has_errors:
@@ -290,17 +292,34 @@ def test_cmd(
     adapter = get_adapter(ir.runtime)
     result = adapter.run(ir, RunRequest(input={"input": "test", "auto_approve": True}))
     ok = result.status.value in {"COMPLETED", "WAITING_FOR_APPROVAL", "WAITING_FOR_INPUT"}
+    eval_report = None
+    if eval_outputs or golden or ir.evaluation.enabled:
+        golden_path = golden
+        if golden_path is None and ir.evaluation.golden_path:
+            golden_path = Path(ir.evaluation.golden_path)
+        eval_report = EvaluationEngine().evaluate(
+            ir,
+            result.output if isinstance(result.output, dict) else {"output": result.output},
+            golden=golden_path,
+            use_llm_judge=ir.evaluation.llm_judge or None,
+        )
+        if golden_path or ir.evaluation.enabled:
+            ok = ok and eval_report.passed
     if generate_first:
         out = Path(".agentforge/test_gen") / ir.name
         ProjectGenerator().generate(ir, output_dir=out, runtime=ir.runtime)
         subprocess.run([sys.executable, "-m", "pip", "install", "-e", str(out), "-q"], check=False)
         proc = subprocess.run([sys.executable, "-m", "pytest", "-q", str(out / "tests")], check=False)
         ok = ok and proc.returncode == 0
-    payload = {"ok": ok, "run_status": result.status.value, "output": result.output}
+    payload: dict[str, Any] = {"ok": ok, "run_status": result.status.value, "output": result.output}
+    if eval_report is not None:
+        payload["evaluation"] = eval_report.to_dict()
     if ctx.obj["json"]:
         _print(payload, json_out=True, quiet=False)
     else:
         console.print(f"[green]test ok[/green] status={result.status.value}" if ok else "[red]test failed[/red]")
+        if eval_report is not None:
+            console.print(f"evaluation passed={eval_report.passed} overall={eval_report.overall:.2f}")
     raise typer.Exit(0 if ok else 1)
 
 
@@ -309,8 +328,8 @@ def run(
     ctx: typer.Context,
     path: Path = typer.Argument(Path("workflow.yaml")),
     input_text: str = typer.Option("hello", "--input", "-i"),
-    runtime: Optional[str] = typer.Option(None, "--runtime"),
-    thread_id: Optional[str] = typer.Option(None, "--thread-id"),
+    runtime: str | None = typer.Option(None, "--runtime"),
+    thread_id: str | None = typer.Option(None, "--thread-id"),
     dry_run: bool = typer.Option(False, "--dry-run"),
 ) -> None:
     """Execute a workflow."""
@@ -345,8 +364,8 @@ def resume(
     path: Path = typer.Argument(Path("workflow.yaml")),
     thread_id: str = typer.Option(..., "--thread-id"),
     approve: bool = typer.Option(True, "--approve/--reject"),
-    value: Optional[str] = typer.Option(None, "--value"),
-    runtime: Optional[str] = typer.Option(None, "--runtime"),
+    value: str | None = typer.Option(None, "--value"),
+    runtime: str | None = typer.Option(None, "--runtime"),
 ) -> None:
     """Resume a paused / waiting workflow."""
     ir = _load_ir(path)
@@ -382,19 +401,27 @@ def trace(
     ctx: typer.Context,
     thread_id: str = typer.Argument(...),
     runtime: str = typer.Option("langgraph", "--runtime"),
+    fmt: str = typer.Option("ascii", "--format", help="ascii|jsonl|json"),
 ) -> None:
-    """Show an event trace tree for a run."""
+    """Show an event trace for a run (ASCII tree or JSONL spans)."""
     adapter = get_adapter(runtime)
     events = adapter.store.list_events(thread_id)  # type: ignore[attr-defined]
-    tree_text = format_trace_tree(events)
-    if ctx.obj["json"]:
+    if fmt == "jsonl":
+        text = format_trace_jsonl(events, thread_id=thread_id)
+        if ctx.obj["json"]:
+            _print({"thread_id": thread_id, "format": "jsonl", "content": text}, json_out=True, quiet=False)
+        else:
+            console.print(text, end="" if text.endswith("\n") else "\n")
+        return
+    if fmt == "json" or ctx.obj["json"]:
         _print({"thread_id": thread_id, "events": events}, json_out=True, quiet=False)
-    else:
-        tree = Tree(f"trace:{thread_id}")
-        for ev in events:
-            tree.add(f"{ev.get('type')} @ {ev.get('at')}")
-        console.print(tree)
-        console.print(tree_text)
+        return
+    tree_text = format_trace_tree(events)
+    tree = Tree(f"trace:{thread_id}")
+    for ev in events:
+        tree.add(f"{ev.get('type')} @ {ev.get('at')}")
+    console.print(tree)
+    console.print(tree_text)
 
 
 @app.command()
@@ -402,17 +429,27 @@ def evaluate(
     ctx: typer.Context,
     path: Path = typer.Argument(Path("workflow.yaml")),
     input_text: str = typer.Option("evaluate me", "--input", "-i"),
+    golden: Path | None = typer.Option(None, "--golden", help="Golden JSON/YAML expectations"),
+    llm_judge: bool = typer.Option(False, "--llm-judge", help="Enable LLM-as-judge (mock-safe)"),
 ) -> None:
-    """Run workflow and evaluate outputs."""
+    """Run workflow and evaluate outputs (heuristics, golden, optional LLM judge)."""
     ir = _load_ir(path)
     adapter = get_adapter(ir.runtime)
     adapter.compile(ir)
     result = adapter.run(ir, RunRequest(input={"input": input_text, "auto_approve": True}))
-    report = EvaluationEngine().evaluate(ir, result.output)
+    golden_path = golden or (Path(ir.evaluation.golden_path) if ir.evaluation.golden_path else None)
+    report = EvaluationEngine().evaluate(
+        ir,
+        result.output if isinstance(result.output, dict) else {"output": result.output},
+        golden=golden_path,
+        use_llm_judge=llm_judge or ir.evaluation.llm_judge,
+    )
     if ctx.obj["json"]:
         _print(report.to_dict(), json_out=True, quiet=False)
     else:
         console.print(report)
+    if not report.passed:
+        raise typer.Exit(1)
 
 
 @app.command()
@@ -420,7 +457,7 @@ def export(
     ctx: typer.Context,
     path: Path = typer.Argument(Path("workflow.yaml")),
     format: str = typer.Option("mermaid", "--format", help="mermaid|json|yaml"),
-    out: Optional[Path] = typer.Option(None, "--out"),
+    out: Path | None = typer.Option(None, "--out"),
 ) -> None:
     """Export IR / diagrams."""
     ir = _load_ir(path)
@@ -444,7 +481,7 @@ def export(
 def design(
     ctx: typer.Context,
     task: str = typer.Option(..., "--task", help="Natural language task"),
-    pattern: Optional[str] = typer.Option(None, "--pattern"),
+    pattern: str | None = typer.Option(None, "--pattern"),
     out: Path = typer.Option(Path("workflow.yaml"), "--out"),
 ) -> None:
     """Design a validated workflow YAML from a task description."""

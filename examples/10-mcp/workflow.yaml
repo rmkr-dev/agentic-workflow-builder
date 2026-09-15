@@ -1,0 +1,55 @@
+apiVersion: agentforge/v1
+kind: Workflow
+metadata:
+  name: mcp-echo
+  description: Live MCP stdio echo tool with explicit grants
+  version: 0.1.0
+  tags: [mcp, example]
+spec:
+  pattern: sequential
+  runtime: langgraph
+  agents:
+    - id: operator
+      role: operator
+      system_prompt: Call the granted MCP echo tool and return its result.
+      tools: [mcp_echo]
+  tools:
+    - id: mcp_echo
+      kind: mcp
+      description: Echo via in-repo MCP stdio server
+      mcp_server: echo_server
+      mcp_tool: echo
+      permissions: {}
+  mcp_servers:
+    - id: echo_server
+      transport: stdio
+      command: python
+      args: [examples/mcp_echo_server.py]
+      granted_tools: [echo]
+  nodes:
+    - id: start
+      type: START
+    - id: call_echo
+      type: TOOL
+      tool: mcp_echo
+    - id: operator
+      type: AGENT
+      agent: operator
+    - id: end
+      type: END
+  edges:
+    - source: start
+      target: call_echo
+    - source: call_echo
+      target: operator
+    - source: operator
+      target: end
+  policies:
+    tool:
+      default_deny: true
+      allowed_tools: [mcp_echo]
+      require_explicit_grants: true
+    budget:
+      max_steps: 20
+      max_llm_calls: 10
+      max_tool_calls: 10

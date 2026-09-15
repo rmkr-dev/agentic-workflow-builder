@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agentforge"
-version = "0.1.0"
+version = "0.1.1"
 description = "Compile agentic intent into executable workflows."
 readme = "README.md"
 license = "Apache-2.0"
@@ -37,23 +37,31 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-microsoft = ["agent-framework>=1.0.0b1"]
+microsoft = ["agent-framework>=1.0.0"]
+mcp = ["mcp>=1.0,<3", "anyio>=4"]
+otel = ["opentelemetry-api>=1.20,<2"]
 dev = [
   "pytest>=8.2,<9",
   "pytest-cov>=5.0,<7",
   "ruff>=0.6,<1",
   "mypy>=1.11,<2",
   "types-PyYAML>=6.0",
+  "mcp>=1.0,<3",
+  "anyio>=4",
+  "build>=1.2",
+  "twine>=5.0",
 ]
-all = ["agentforge[microsoft,dev]"]
+all = ["agentforge[microsoft,mcp,otel,dev]"]
 
 [project.scripts]
 agentforge = "agentforge.cli.app:main"
 
 [project.urls]
-Homepage = "https://github.com/agentforge/agentforge"
-Documentation = "https://github.com/agentforge/agentforge/tree/main/docs"
-Issues = "https://github.com/agentforge/agentforge/issues"
+Homepage = "https://github.com/rmkr-dev/agentic-workflow-builder"
+Documentation = "https://github.com/rmkr-dev/agentic-workflow-builder/tree/main/docs"
+Repository = "https://github.com/rmkr-dev/agentic-workflow-builder"
+Issues = "https://github.com/rmkr-dev/agentic-workflow-builder/issues"
+Changelog = "https://github.com/rmkr-dev/agentic-workflow-builder/blob/main/CHANGELOG.md"
 
 [tool.hatch.build.targets.wheel]
 packages = ["agentforge"]
@@ -83,7 +91,11 @@ target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP"]
-
+ignore = [
+  "E501",  # line length — keep readable long CLI/docs strings
+  "B008",  # Typer Option()/Argument() defaults
+  "UP042", # str Enum modernization optional
+]
 [tool.mypy]
 python_version = "3.11"
 strict = false

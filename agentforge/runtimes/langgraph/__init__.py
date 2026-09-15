@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import operator
 import uuid
-from typing import Annotated, Any, Iterator, TypedDict
+from collections.abc import Iterator
+from typing import Annotated, Any, TypedDict
 
 from agentforge.ir.models import RunState, WorkflowIR
 from agentforge.observability.events import EventEmitter
@@ -17,12 +18,11 @@ from agentforge.runtimes.base import (
     RunRequest,
     RunResult,
     RuntimeAdapter,
-    UnsupportedCapabilityError,
 )
 from agentforge.runtimes.base.helpers import (
     DEFAULT_MOCK_SUPERVISOR_HOPS,
-    SQLiteRunStore,
     SUPERVISOR_ROLES,
+    SQLiteRunStore,
     apply_transform,
     eval_condition,
     llm_respond,
@@ -269,7 +269,6 @@ class LangGraphAdapter(RuntimeAdapter):
             return {"loop_count": count}
 
         # Register nodes
-        interrupt_before: list[str] = []
         for n in ir.nodes:
             if n.type == NodeType.START:
                 continue
@@ -301,8 +300,6 @@ class LangGraphAdapter(RuntimeAdapter):
                 graph.add_node(n.id, passthrough)
 
         # Wire edges
-        start_id = next(n.id for n in ir.nodes if n.type == NodeType.START)
-        # Map START edges
         for e in ir.edges:
             src = e.source
             tgt = e.target

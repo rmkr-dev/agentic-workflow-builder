@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Any, Iterator
+import asyncio
+from collections.abc import Iterator
+from typing import Any
 
 from agentforge.ir.models import RunState, WorkflowIR
 from agentforge.runtimes.base import (
@@ -15,17 +17,15 @@ from agentforge.runtimes.base import (
     RuntimeAdapter,
     UnsupportedCapabilityError,
 )
-from agentforge.runtimes.base.helpers import SQLiteRunStore, llm_respond, new_thread_id
+from agentforge.runtimes.base.helpers import SQLiteRunStore, new_thread_id
 from agentforge.schema import NodeType, WorkflowPattern
 
-
-# Patterns we can map onto WorkflowBuilder fan-out/fan-in + edges
+# Patterns we can map onto WorkflowBuilder chains / fan-out-fan-in
 _SUPPORTED_PATTERNS = {
     WorkflowPattern.SINGLE,
     WorkflowPattern.SEQUENTIAL,
     WorkflowPattern.PARALLEL,
     WorkflowPattern.FAN_OUT_FAN_IN,
-    WorkflowPattern.CONDITIONAL,
     WorkflowPattern.HANDOFF,
 }
 
@@ -33,11 +33,11 @@ _SUPPORTED_PATTERNS = {
 class MicrosoftAdapter(RuntimeAdapter):
     """Adapter for Microsoft Agent Framework (agent-framework).
 
-    Fully supported: sequential chains, fan-out/fan-in, basic conditionals.
-    Partial: HITL/checkpoints when the optional package is installed.
-    Unsupported: nested subworkflows as first-class IR nodes, MCP grants,
-    reflection loops, supervisor routing — these raise UnsupportedCapabilityError
-    instead of silently downgrading.
+    Fully supported (when installed): sequential chains and parallel fan-out/fan-in
+    that execute on real AF ``WorkflowBuilder`` graphs.
+    Unsupported: nested subworkflows, MCP grants, reflection loops, supervisor
+    routing, HITL parity — these raise ``UnsupportedCapabilityError`` instead of
+    silently downgrading.
     """
 
     name = "microsoft"
@@ -64,7 +64,7 @@ class MicrosoftAdapter(RuntimeAdapter):
                 status(
                     c,
                     CapabilityStatus.UNSUPPORTED,
-                    "Install optional extra: pip install agentforge[microsoft]",
+                    "Install optional extra: pip install 'agentforge[microsoft]'",
                 )
                 for c in Capability
             ]
@@ -72,16 +72,16 @@ class MicrosoftAdapter(RuntimeAdapter):
         matrix = [
             (Capability.COMPILE, CapabilityStatus.SUPPORTED, "WorkflowBuilder mapping"),
             (Capability.VALIDATE, CapabilityStatus.SUPPORTED, "pattern allowlist check"),
-            (Capability.RUN, CapabilityStatus.SUPPORTED, "async run bridged to sync API"),
+            (Capability.RUN, CapabilityStatus.SUPPORTED, "async AF workflow.run bridged to sync API"),
             (Capability.RESUME, CapabilityStatus.PARTIAL, "requires checkpoint_storage on builder"),
             (Capability.STREAM, CapabilityStatus.PARTIAL, "run(..., stream=True) when AF present"),
             (Capability.CANCEL, CapabilityStatus.PARTIAL, "cooperative cancel via local store"),
             (Capability.INSPECT, CapabilityStatus.SUPPORTED, "SQLite inspect view"),
             (Capability.SERIALIZE_STATE, CapabilityStatus.SUPPORTED, "local snapshot"),
             (Capability.CHECKPOINTS, CapabilityStatus.PARTIAL, "FileCheckpointStorage when configured"),
-            (Capability.HITL, CapabilityStatus.PARTIAL, "request-info style; not full IR parity"),
+            (Capability.HITL, CapabilityStatus.UNSUPPORTED, "HITL/request-info not mapped from IR"),
             (Capability.PARALLEL, CapabilityStatus.SUPPORTED, "add_fan_out_edges / add_fan_in_edges"),
-            (Capability.CONDITIONAL, CapabilityStatus.SUPPORTED, "switch-case / conditioned edges"),
+            (Capability.CONDITIONAL, CapabilityStatus.UNSUPPORTED, "switch-case not mapped from IR yet"),
             (Capability.LOOPS, CapabilityStatus.UNSUPPORTED, "bounded IR loops not mapped"),
             (Capability.SUBWORKFLOWS, CapabilityStatus.UNSUPPORTED, "no nested Workflow IR embedding"),
             (Capability.MCP, CapabilityStatus.UNSUPPORTED, "MCP grants are LangGraph-path only today"),
@@ -104,7 +104,13 @@ class MicrosoftAdapter(RuntimeAdapter):
                 f"Supported: {sorted(p.value for p in _SUPPORTED_PATTERNS)}"
             )
         for n in ir.nodes:
-            if n.type in {NodeType.LOOP, NodeType.SUBWORKFLOW}:
+            if n.type in {
+                NodeType.LOOP,
+                NodeType.SUBWORKFLOW,
+                NodeType.HUMAN_APPROVAL,
+                NodeType.CONDITION,
+                NodeType.ROUTER,
+            }:
                 errors.append(f"Node type {n.type.value} is unsupported on microsoft runtime")
         return errors
 
@@ -114,39 +120,88 @@ class MicrosoftAdapter(RuntimeAdapter):
             raise UnsupportedCapabilityError(
                 self.name,
                 Capability.COMPILE,
-                "agent-framework package not installed",
+                "agent-framework package not installed — pip install 'agentforge[microsoft]'",
             )
         errors = self.validate_ir(ir)
         if errors:
             raise UnsupportedCapabilityError(self.name, Capability.COMPILE, "; ".join(errors))
 
-        # Build an executable plan (AF Workflow when possible; fallback deterministic plan)
-        plan = self._build_plan(ir)
-        self._compiled[ir.name] = {"ir": ir, "plan": plan}
-        return plan
+        workflow = self._build_af_workflow(ir)
+        self._compiled[ir.name] = {"ir": ir, "workflow": workflow}
+        return workflow
 
-    def _build_plan(self, ir: WorkflowIR) -> dict[str, Any]:
-        """Construct an execution plan. Prefer AF WorkflowBuilder when importable."""
-        try:
-            from agent_framework import WorkflowBuilder
-            from agent_framework import Executor
+    def _build_af_workflow(self, ir: WorkflowIR) -> Any:
+        """Build a real agent-framework Workflow for sequential or parallel graphs."""
+        from agent_framework import WorkflowBuilder
 
-            # Minimal executor wrappers — AF API varies by preview version.
-            # We keep a portable plan and execute deterministically below when
-            # AF executor subclassing is unavailable.
-            _ = WorkflowBuilder
-            _ = Executor
-            return {
-                "backend": "agent_framework",
-                "steps": [n.id for n in ir.nodes if n.type not in {NodeType.START, NodeType.END}],
-                "pattern": ir.pattern.value,
-            }
-        except Exception:
-            return {
-                "backend": "deterministic_bridge",
-                "steps": [n.id for n in ir.nodes if n.type == NodeType.AGENT],
-                "pattern": ir.pattern.value,
-            }
+        from agentforge.runtimes.microsoft.executors import (
+            make_agent_executor,
+            make_join,
+            make_passthrough,
+        )
+
+        agent_nodes = [n for n in ir.nodes if n.type == NodeType.AGENT]
+        if not agent_nodes:
+            raise UnsupportedCapabilityError(
+                self.name, Capability.COMPILE, "Microsoft adapter requires at least one AGENT node"
+            )
+
+        def prompt_for(node) -> str:
+            aid = node.agent_id or node.id
+            agent = ir.agents.get(aid)
+            return agent.system_prompt if agent else "You are helpful."
+
+        is_parallel = ir.pattern in {WorkflowPattern.PARALLEL, WorkflowPattern.FAN_OUT_FAN_IN} or any(
+            n.type == NodeType.PARALLEL for n in ir.nodes
+        )
+
+        if is_parallel and len(agent_nodes) >= 2:
+            start = make_passthrough("af_start")
+            workers = [make_agent_executor(n.id, prompt_for(n), final=False) for n in agent_nodes]
+            join = make_join("af_join")
+            return (
+                WorkflowBuilder(start_executor=start, name=ir.name)
+                .add_fan_out_edges(start, workers)
+                .add_fan_in_edges(workers, join)
+                .build()
+            )
+
+        # Sequential / single / handoff: chain AGENT nodes in edge order
+        ordered = self._order_agent_nodes(ir, agent_nodes)
+        executors = []
+        for i, n in enumerate(ordered):
+            final = i == len(ordered) - 1
+            executors.append(make_agent_executor(n.id, prompt_for(n), final=final))
+        if len(executors) == 1:
+            return WorkflowBuilder(start_executor=executors[0], name=ir.name).build()
+        builder = WorkflowBuilder(start_executor=executors[0], name=ir.name)
+        builder.add_chain(executors)
+        return builder.build()
+
+    def _order_agent_nodes(self, ir: WorkflowIR, agent_nodes: list) -> list:
+        """Topological-ish order following edges; fall back to declaration order."""
+        by_id = {n.id: n for n in agent_nodes}
+        agent_ids = set(by_id)
+        successors: dict[str, list[str]] = {i: [] for i in agent_ids}
+        indeg = {i: 0 for i in agent_ids}
+        for e in ir.edges:
+            if e.source in agent_ids and e.target in agent_ids:
+                successors[e.source].append(e.target)
+                indeg[e.target] += 1
+        queue = [i for i, d in indeg.items() if d == 0]
+        ordered_ids: list[str] = []
+        while queue:
+            # Stable: prefer declaration order among ties
+            queue.sort(key=lambda x: next(i for i, n in enumerate(agent_nodes) if n.id == x))
+            cur = queue.pop(0)
+            ordered_ids.append(cur)
+            for nxt in successors[cur]:
+                indeg[nxt] -= 1
+                if indeg[nxt] == 0:
+                    queue.append(nxt)
+        if len(ordered_ids) != len(agent_nodes):
+            return list(agent_nodes)
+        return [by_id[i] for i in ordered_ids]
 
     def run(self, ir: WorkflowIR, request: RunRequest) -> RunResult:
         self.require(Capability.RUN)
@@ -164,20 +219,30 @@ class MicrosoftAdapter(RuntimeAdapter):
             return RunResult(status=RunState.CANCELLED, thread_id=thread_id, output={})
 
         user_input = str(request.input.get("input", request.input.get("query", "")))
-        outputs: list[str] = []
-        for agent_id, agent in ir.agents.items():
-            outputs.append(llm_respond(agent.system_prompt, user_input, agent_id=agent_id))
-        if not outputs:
-            for n in ir.nodes:
-                if n.type == NodeType.AGENT:
-                    outputs.append(llm_respond("assistant", user_input, agent_id=n.id))
+        workflow = self._compiled[ir.name]["workflow"]
 
-        if ir.pattern in {WorkflowPattern.PARALLEL, WorkflowPattern.FAN_OUT_FAN_IN}:
-            final = " | ".join(outputs)
-        else:
+        async def _run() -> Any:
+            return await workflow.run(user_input)
+
+        try:
+            result = asyncio.run(_run())
+            outputs = list(result.get_outputs() or [])
             final = outputs[-1] if outputs else user_input
+            backend = "agent_framework"
+        except Exception as exc:
+            # Surface clearly — do not silently fall back to another runtime
+            raise UnsupportedCapabilityError(
+                self.name,
+                Capability.RUN,
+                f"Microsoft AF workflow execution failed: {exc}",
+            ) from exc
 
-        out = {"output": final, "backend": "microsoft", "steps": outputs}
+        out = {
+            "output": final,
+            "backend": backend,
+            "af_outputs": outputs,
+            "pattern": ir.pattern.value,
+        }
         self.store.save_run(thread_id, RunState.COMPLETED.value, out)
         self.store.add_event(thread_id, "ms_run_finished", out)
         return RunResult(
@@ -191,7 +256,6 @@ class MicrosoftAdapter(RuntimeAdapter):
         info = {c.capability: c for c in self.capabilities()}[Capability.RESUME]
         if info.status == CapabilityStatus.UNSUPPORTED:
             raise UnsupportedCapabilityError(self.name, Capability.RESUME, info.notes)
-        # Partial: re-run with prior input merged
         return self.run(ir, request)
 
     def stream(self, ir: WorkflowIR, request: RunRequest) -> Iterator[dict[str, Any]]:

@@ -1,0 +1,67 @@
+apiVersion: agentforge/v1
+kind: Workflow
+metadata:
+  name: security-deny
+  description: Fail-closed demo — ungated CLI/shell and unlisted tools are denied
+  version: 0.1.0
+  tags: [security, default_deny, example]
+spec:
+  pattern: sequential
+  runtime: langgraph
+  agents:
+    - id: operator
+      role: operator
+      system_prompt: Attempt tools; expect denials for ungated shell/CLI.
+      tools: [safe_echo, ungated_shell, unlisted_cli]
+  tools:
+    - id: safe_echo
+      kind: deterministic
+      deterministic_fn: echo
+      description: Allowlisted deterministic echo
+      permissions: {}
+    - id: ungated_shell
+      kind: cli
+      command: echo
+      args: ["should-be-blocked"]
+      description: CLI without allow_shell — must fail closed
+      permissions:
+        allow_shell: false
+    - id: unlisted_cli
+      kind: cli
+      command: echo
+      args: ["also-blocked"]
+      description: CLI not on allowlist — blocked by default_deny
+      permissions:
+        allow_shell: true
+        allowed_commands: [echo]
+  nodes:
+    - id: start
+      type: START
+    - id: try_ungated
+      type: TOOL
+      tool: ungated_shell
+    - id: end
+      type: END
+  edges:
+    - source: start
+      target: try_ungated
+    - source: try_ungated
+      target: end
+  policies:
+    tool:
+      default_deny: true
+      allowed_tools: [safe_echo]
+      require_explicit_grants: true
+    security:
+      allow_unrestricted_shell: false
+      block_secrets_in_prompts: true
+      redact_outputs: true
+    budget:
+      max_steps: 10
+      max_llm_calls: 5
+      max_tool_calls: 5
+  guardrails:
+    - id: block-secrets
+      rules: ["api_key", "password\\s*="]
+      on_match: block
+      message: Blocked potential secret leakage

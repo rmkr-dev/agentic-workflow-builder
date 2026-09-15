@@ -209,7 +209,7 @@ class ValidationEngine:
                         Diagnostic(
                             code="POL001",
                             severity=Severity.WARNING,
-                            path=f"spec.policies.tool.allowed_tools",
+                            path="spec.policies.tool.allowed_tools",
                             message=f"Tool '{tid}' not in allowed_tools allowlist",
                             suggestion="Add the tool id to policies.tool.allowed_tools",
                         )

@@ -4,12 +4,16 @@
 
 AgentForge is a Python-first developer tool: declarative YAML/JSON specs are parsed, validated, lowered to a canonical Workflow IR, compiled onto runtime adapters, and optionally code-generated into standalone agent repositories.
 
+Repository: [rmkr-dev/agentic-workflow-builder](https://github.com/rmkr-dev/agentic-workflow-builder)
+
 ## What it is
 
 - CLI + SDK + declarative workflow compiler + project generator
 - Primary runtime: **LangGraph** (fully working)
 - Secondary runtime: **Microsoft Agent Framework** (honest capability matrix — never silent downgrade)
-- Local SQLite checkpoints / events
+- Live **MCP** client (stdio/SSE) with explicit tool grants
+- Golden-file / schema evaluation + optional LLM-as-judge
+- Local SQLite checkpoints / events + JSONL / OTel-shaped traces
 - Provider-neutral LLM config via environment variables only
 
 ## What it is not
@@ -18,13 +22,29 @@ AgentForge is a Python-first developer tool: declarative YAML/JSON specs are par
 - Not Cursor-dependent
 - Not a hosted multi-tenant platform
 
+## Install
+
+```bash
+python -m venv .venv && source .venv/bin/activate  # Windows: .venv\Scripts\activate
+pip install -e ".[dev]"
+```
+
+Optional extras:
+
+```bash
+pip install 'agentforge[microsoft]'   # Microsoft AF sequential/parallel
+pip install 'agentforge[mcp]'         # MCP SDK (also in [dev])
+pip install 'agentforge[otel]'        # optional OpenTelemetry API
+```
+
+See [docs/setup.md](docs/setup.md) for prerequisites, env vars, and verification.
+
 ## Quick start
 
 ```bash
-pip install -e ".[dev]"
 agentforge doctor --full
 agentforge validate examples/01-single/workflow.yaml
-agentforge run examples/01-single/workflow.yaml --input "Hello"
+agentforge run examples/01-single/workflow.yaml --input "Hello" --non-interactive
 agentforge generate examples/01-single/workflow.yaml --out ./generated/single-agent
 ```
 
@@ -42,6 +62,7 @@ agentforge run examples/01-single/workflow.yaml --input "Hello"
 
 `run` and `doctor` always print `mode=mock|live` (and include it in `--json` output).
 See `.env.example` for the full variable list. `OPENAI_API_KEY` is accepted as a fallback.
+
 ### SDK
 
 ```python
@@ -54,8 +75,11 @@ print(project.path)
 
 ### Design from natural language
 
+Multi-intent tasks compose patterns (research + write + approval keep all implied agents):
+
 ```bash
 agentforge design --task "Research then write a summary with human approval" --out workflow.yaml
+agentforge validate workflow.yaml
 ```
 
 ## CLI
@@ -67,12 +91,22 @@ agentforge inspect | trace | evaluate | export | design | doctor | publish
 
 Global flags: `--json` `--quiet` `--verbose` `--non-interactive`
 
-These global flags may appear **before or after** the subcommand:
+These may appear **before or after** the subcommand:
 
 ```bash
 agentforge --non-interactive run examples/01-single/workflow.yaml
 agentforge run examples/01-single/workflow.yaml --non-interactive
 agentforge --json doctor
+```
+
+Full workflows: [docs/usage.md](docs/usage.md).
+
+### Evaluate / trace
+
+```bash
+agentforge evaluate examples/01-single/workflow.yaml --golden tests/fixtures/golden_pass.json
+agentforge run examples/01-single/workflow.yaml --input "hi"
+agentforge trace <thread_id> --format jsonl
 ```
 
 ## Workflow patterns
@@ -81,15 +115,23 @@ single · sequential · parallel / fan-out-fan-in · supervisor · hierarchical 
 
 ## Examples
 
-See `examples/01-single` through `examples/09-hitl-evaluator`.
+| Example | Focus |
+|---------|--------|
+| `01`–`09` | Core patterns (single → HITL/evaluator) |
+| `10-mcp` | Live MCP stdio echo + explicit grants |
+| `11-security` | Fail-closed `default_deny` / ungated CLI |
 
 ## Documentation
 
+- [Setup](docs/setup.md)
+- [Usage](docs/usage.md)
+- [Updating](docs/updating.md)
 - [Architecture](docs/architecture.md)
 - [DSL reference](docs/dsl.md)
 - [Runtimes](docs/runtimes.md)
 - [Security](docs/security.md)
 - [Contributing](CONTRIBUTING.md)
+- [Changelog](CHANGELOG.md)
 
 ## License
 

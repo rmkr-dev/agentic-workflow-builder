@@ -4,35 +4,121 @@ on:
   push:
     branches: [main, master]
   pull_request:
+    branches: [main, master]
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   test:
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         python-version: ["3.11", "3.12"]
+    env:
+      AGENTFORGE_LLM_MOCK: "1"
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-      - name: Install
-        run: pip install -e ".[dev]"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install package + extras
+        run: |
+          python -m pip install -U pip
+          pip install -e ".[dev,microsoft]"
+          pip install build
+
+      - name: Ruff lint
+        run: ruff check agentforge tests
+
+      - name: Mypy (advisory)
+        continue-on-error: true
+        run: mypy agentforge
+
       - name: Secret scan (basic)
         run: |
-          if grep -RInE 'sk-[A-Za-z0-9]{20,}|api[_-]?key\s*=\s*['\''\"][^'\''\"]+['\''\"]' \
-            --exclude-dir=.git --exclude-dir=.venv --exclude='*.md' . ; then
-            echo "Possible secrets found"; exit 1;
+          set -euo pipefail
+          if grep -RInE 'sk-[A-Za-z0-9]{20,}|BEGIN (RSA |OPENSSH )?PRIVATE KEY' \
+            --exclude-dir=.git --exclude-dir=.venv --exclude-dir=dist --exclude-dir=build \
+            --exclude-dir=.mypy_cache --exclude-dir=.ruff_cache --exclude-dir=.pytest_cache \
+            --exclude='*.md' --exclude='.env.example' . ; then
+            echo "Possible secrets found"
+            exit 1
           fi
           echo "secret scan clean"
-      - name: Tests
-        env:
-          AGENTFORGE_LLM_MOCK: "1"
+
+      - name: Full pytest
         run: pytest -q
+
       - name: Doctor
         run: agentforge doctor --full
-      - name: Validate examples
+
+      - name: Validate all examples
         run: |
+          set -euo pipefail
           for f in examples/*/workflow.yaml; do
+            echo "validate $f"
             agentforge validate "$f"
           done
+
+      - name: Run key examples (mock)
+        run: |
+          set -euo pipefail
+          agentforge run examples/01-single/workflow.yaml --input "ci" --non-interactive
+          agentforge run examples/02-sequential/workflow.yaml --input "ci" --non-interactive
+          agentforge run examples/03-parallel/workflow.yaml --input "ci" --non-interactive
+          agentforge run examples/10-mcp/workflow.yaml --input "hello mcp" --non-interactive
+
+      - name: Security example fails closed
+        run: |
+          set +e
+          agentforge run examples/11-security/workflow.yaml --input "probe" --non-interactive
+          code=$?
+          set -e
+          if [ "$code" -eq 0 ]; then
+            echo "expected non-zero exit for security deny demo"
+            exit 1
+          fi
+          echo "security deny ok (exit=$code)"
+
+      - name: Design multi-intent + validate
+        run: |
+          agentforge design --task "Research then write a summary with human approval" --out /tmp/designed.yaml
+          agentforge validate /tmp/designed.yaml
+          grep -q researcher /tmp/designed.yaml
+          grep -q writer /tmp/designed.yaml
+          grep -q HUMAN_APPROVAL /tmp/designed.yaml
+
+      - name: Evaluate golden pass/fail
+        run: |
+          agentforge evaluate examples/01-single/workflow.yaml --golden tests/fixtures/golden_pass.json
+          set +e
+          agentforge evaluate examples/01-single/workflow.yaml --golden tests/fixtures/golden_fail.json
+          code=$?
+          set -e
+          test "$code" -ne 0
+
+      - name: Trace JSONL
+        run: |
+          set -euo pipefail
+          out=$(agentforge --json run examples/01-single/workflow.yaml --input "trace-ci" --non-interactive)
+          tid=$(python -c "import json,sys; print(json.loads(sys.argv[1])['thread_id'])" "$out")
+          agentforge trace "$tid" --format jsonl | head -n 2 | grep -q trace_id
+
+      - name: Microsoft AF sequential (when installed)
+        run: |
+          agentforge run examples/02-sequential/workflow.yaml --runtime microsoft --input "hi" --non-interactive
+
+      - name: Generate project + run its tests
+        run: |
+          set -euo pipefail
+          agentforge generate examples/02-sequential/workflow.yaml --out /tmp/af-gen-seq
+          pip install -e "/tmp/af-gen-seq"
+          pytest -q /tmp/af-gen-seq/tests

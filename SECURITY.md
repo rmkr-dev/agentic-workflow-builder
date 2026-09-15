@@ -20,6 +20,12 @@ Email security reports privately to the maintainers. Do not open public issues f
 - Guardrails support allow / block / modify / escalate
 - Outputs can be redacted for secret-like patterns
 
+## Fail-closed examples
+
+See [`examples/11-security`](examples/11-security) for a workflow that denies ungated CLI
+and unlisted tools under `policies.tool.default_deny: true`.
+
 ## Secrets
 
 Never commit `.env`, API keys, tokens, or private credentials. Use `.env.example` as a template.
+CI includes a basic secret scan on every push/PR.

@@ -1,0 +1,11 @@
+{
+  "contains": "[",
+  "min_length": 1,
+  "forbidden": ["password=", "api_key"],
+  "schema": {
+    "required": ["output"],
+    "properties": {
+      "output": {"type": "string"}
+    }
+  }
+}

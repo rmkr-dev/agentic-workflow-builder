@@ -1,0 +1,4 @@
+{
+  "contains": "THIS_STRING_WILL_NEVER_APPEAR_IN_OUTPUT_xyzzy",
+  "match": "contains"
+}

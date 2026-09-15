@@ -6,10 +6,10 @@ from pathlib import Path
 
 import pytest
 
+from agentforge.evaluation import EvaluationEngine
 from agentforge.parser.loader import SpecLoader
 from agentforge.runtimes import get_adapter
-from agentforge.runtimes.base import Capability, RunRequest, UnsupportedCapabilityError
-from agentforge.evaluation import EvaluationEngine
+from agentforge.runtimes.base import RunRequest, UnsupportedCapabilityError
 
 EXAMPLES = Path(__file__).resolve().parents[2] / "examples"
 
@@ -91,6 +91,24 @@ def test_microsoft_sequential_when_available():
     adapter.compile(ir)
     result = adapter.run(ir, RunRequest(input={"input": "hi"}))
     assert result.status.value == "COMPLETED"
+    assert result.output.get("backend") == "agent_framework"
+    assert result.output.get("output")
+
+
+def test_microsoft_parallel_when_available():
+    adapter = get_adapter("microsoft")
+    ir = SpecLoader().load(EXAMPLES / "03-parallel" / "workflow.yaml")
+    matrix = adapter.capability_matrix()
+    if matrix["run"]["status"] == "unsupported":
+        pytest.skip("microsoft AF not installed")
+    # Ensure pattern is treated as parallel
+    ir = ir.model_copy(update={"runtime": "microsoft"})
+    adapter.compile(ir)
+    result = adapter.run(ir, RunRequest(input={"input": "fan"}))
+    assert result.status.value == "COMPLETED"
+    assert result.output.get("backend") == "agent_framework"
+    assert "|" in str(result.output.get("output", "")) or result.output.get("af_outputs")
+
 
 
 def test_evaluation_engine():

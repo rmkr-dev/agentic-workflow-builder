@@ -11,7 +11,6 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-
 SECRET_PATTERNS = [
     re.compile(r"(?i)(api[_-]?key|secret|password|token)\s*[:=]\s*['\"]?[\w-]{8,}"),
     re.compile(r"sk-[A-Za-z0-9]{20,}"),

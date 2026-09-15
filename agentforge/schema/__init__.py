@@ -224,6 +224,9 @@ class EvaluationSpec(StrictModel):
     rubric: str = "Correctness, completeness, safety"
     pass_threshold: float = 0.7
     metrics: list[str] = Field(default_factory=lambda: ["correctness", "safety"])
+    golden_path: str | None = None
+    output_schema: dict[str, Any] | None = None
+    llm_judge: bool = False
 
 
 class MemorySpec(StrictModel):
