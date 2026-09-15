@@ -1,0 +1,46 @@
+apiVersion: agentforge/v1
+kind: Workflow
+metadata:
+  name: reflection-loop
+  description: Actor-critic reflection with bounded loop
+  version: 0.1.0
+  tags: [reflection, example]
+spec:
+  pattern: reflection
+  runtime: langgraph
+  agents:
+    - id: actor
+      role: actor
+      system_prompt: Draft an answer.
+    - id: critic
+      role: critic
+      system_prompt: Critique the draft.
+  nodes:
+    - id: start
+      type: START
+    - id: actor
+      type: AGENT
+      agent: actor
+    - id: critic
+      type: AGENT
+      agent: critic
+    - id: loop
+      type: LOOP
+      loop_body: actor
+      loop_condition: needs_revision
+      max_iterations: 3
+    - id: end
+      type: END
+  edges:
+    - source: start
+      target: actor
+    - source: actor
+      target: critic
+    - source: critic
+      target: loop
+    - source: loop
+      target: actor
+      label: revise
+    - source: loop
+      target: end
+      label: done

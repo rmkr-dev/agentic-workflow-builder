@@ -1,0 +1,58 @@
+apiVersion: agentforge/v1
+kind: Workflow
+metadata:
+  name: conditional-bounded-loop
+  description: Conditional routing plus a bounded retry loop
+  version: 0.1.0
+  tags: [conditional, bounded_loop, example]
+spec:
+  pattern: conditional
+  runtime: langgraph
+  agents:
+    - id: primary
+      role: primary
+      system_prompt: Handle the primary path.
+    - id: fallback
+      role: fallback
+      system_prompt: Handle the fallback path.
+  nodes:
+    - id: start
+      type: START
+    - id: condition
+      type: CONDITION
+      condition: route == 'primary'
+      routes:
+        "true": primary
+        "false": fallback
+    - id: primary
+      type: AGENT
+      agent: primary
+    - id: fallback
+      type: AGENT
+      agent: fallback
+    - id: loop
+      type: LOOP
+      loop_body: primary
+      loop_condition: continue_loop
+      max_iterations: 2
+    - id: end
+      type: END
+  edges:
+    - source: start
+      target: condition
+    - source: condition
+      target: primary
+      label: "true"
+    - source: condition
+      target: fallback
+      label: "false"
+    - source: primary
+      target: loop
+    - source: fallback
+      target: end
+    - source: loop
+      target: primary
+      label: continue
+    - source: loop
+      target: end
+      label: done

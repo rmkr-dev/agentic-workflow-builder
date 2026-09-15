@@ -1,0 +1,76 @@
+apiVersion: agentforge/v1
+kind: Workflow
+metadata:
+  name: hitl-evaluator
+  description: Human approval gate with evaluator scoring
+  version: 0.1.0
+  tags: [hitl, evaluator, example]
+spec:
+  pattern: hitl
+  runtime: langgraph
+  agents:
+    - id: drafter
+      role: drafter
+      system_prompt: Draft a careful response.
+  tools:
+    - id: echo
+      kind: deterministic
+      deterministic_fn: echo
+    - id: mcp_summarize
+      kind: mcp
+      mcp_server: local
+      mcp_tool: summarize
+      description: MCP summarize with explicit grant
+  mcp_servers:
+    - id: local
+      transport: stdio
+      command: echo
+      granted_tools: [summarize]
+  nodes:
+    - id: start
+      type: START
+    - id: guard
+      type: GUARDRAIL
+      guardrail_action: block
+      guardrail_rules: ["(?i)password\\s*="]
+    - id: drafter
+      type: AGENT
+      agent: drafter
+    - id: approve
+      type: HUMAN_APPROVAL
+      approval_message: Approve the draft?
+    - id: evaluate
+      type: EVALUATOR
+      evaluator_rubric: Correctness, completeness, safety
+    - id: end
+      type: END
+  edges:
+    - source: start
+      target: guard
+    - source: guard
+      target: drafter
+    - source: drafter
+      target: approve
+    - source: approve
+      target: evaluate
+    - source: evaluate
+      target: end
+  guardrails:
+    - id: no-secrets
+      rules: ["sk-[A-Za-z0-9]{10,}"]
+      on_match: block
+      message: Secret-like token blocked
+  evaluation:
+    enabled: true
+    rubric: Correctness, completeness, safety
+    pass_threshold: 0.7
+    metrics: [correctness, safety]
+  policies:
+    tool:
+      default_deny: true
+      allowed_tools: [echo, mcp_summarize]
+    approval:
+      auto_approve_in_tests: true
+    security:
+      allow_unrestricted_shell: false
+      redact_outputs: true

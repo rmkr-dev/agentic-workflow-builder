@@ -1,0 +1,45 @@
+apiVersion: agentforge/v1
+kind: Workflow
+metadata:
+  name: hierarchical-team
+  description: Manager delegates to specialist agents
+  version: 0.1.0
+  tags: [hierarchical, example]
+spec:
+  pattern: hierarchical
+  runtime: langgraph
+  agents:
+    - id: manager
+      role: manager
+      system_prompt: Coordinate specialists.
+    - id: specialist_code
+      role: specialist
+      system_prompt: Handle coding tasks.
+    - id: specialist_docs
+      role: specialist
+      system_prompt: Handle documentation tasks.
+  nodes:
+    - id: start
+      type: START
+    - id: manager
+      type: AGENT
+      agent: manager
+    - id: specialist_code
+      type: AGENT
+      agent: specialist_code
+    - id: specialist_docs
+      type: AGENT
+      agent: specialist_docs
+    - id: end
+      type: END
+  edges:
+    - source: start
+      target: manager
+    - source: manager
+      target: specialist_code
+    - source: manager
+      target: specialist_docs
+    - source: specialist_code
+      target: end
+    - source: specialist_docs
+      target: end

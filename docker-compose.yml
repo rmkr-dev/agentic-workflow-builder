@@ -1,0 +1,9 @@
+services:
+  agentforge:
+    image: python:3.12-slim
+    working_dir: /workspace
+    volumes:
+      - ./:/workspace
+    environment:
+      AGENTFORGE_LLM_MOCK: "1"
+    command: ["bash", "-lc", "pip install -e '.[dev]' && agentforge doctor --full"]

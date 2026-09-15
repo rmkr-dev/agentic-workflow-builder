@@ -1,0 +1,8 @@
+flowchart LR
+  Spec[Spec YAML] --> Parse[Parser]
+  Parse --> IR[Workflow IR]
+  IR --> Validate[Validator]
+  Validate --> Compile[Compiler]
+  Compile --> Runtime[Runtime Adapter]
+  IR --> Codegen[Generator]
+  Codegen --> Project[Standalone Repo]

@@ -1,0 +1,58 @@
+apiVersion: agentforge/v1
+kind: Workflow
+metadata:
+  name: supervisor-workers
+  description: Supervisor routes to workers then completes
+  version: 0.1.0
+  tags: [supervisor, example]
+spec:
+  pattern: supervisor
+  runtime: langgraph
+  agents:
+    - id: supervisor
+      role: supervisor
+      system_prompt: Route work to a worker or finish.
+    - id: worker_research
+      role: worker
+      system_prompt: Research the topic.
+    - id: worker_write
+      role: worker
+      system_prompt: Write the answer.
+  nodes:
+    - id: start
+      type: START
+    - id: supervisor
+      type: AGENT
+      agent: supervisor
+    - id: router
+      type: ROUTER
+      routes:
+        worker_research: worker_research
+        worker_write: worker_write
+        done: end
+    - id: worker_research
+      type: AGENT
+      agent: worker_research
+    - id: worker_write
+      type: AGENT
+      agent: worker_write
+    - id: end
+      type: END
+  edges:
+    - source: start
+      target: supervisor
+    - source: supervisor
+      target: router
+    - source: router
+      target: worker_research
+      label: worker_research
+    - source: router
+      target: worker_write
+      label: worker_write
+    - source: router
+      target: end
+      label: done
+    - source: worker_research
+      target: supervisor
+    - source: worker_write
+      target: supervisor

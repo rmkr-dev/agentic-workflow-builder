@@ -1,0 +1,35 @@
+apiVersion: agentforge/v1
+kind: Workflow
+metadata:
+  name: sequential-pipeline
+  description: Researcher then writer sequential pipeline
+  version: 0.1.0
+  tags: [sequential, example]
+spec:
+  pattern: sequential
+  runtime: langgraph
+  agents:
+    - id: researcher
+      role: researcher
+      system_prompt: Gather key facts.
+    - id: writer
+      role: writer
+      system_prompt: Write a short summary.
+  nodes:
+    - id: start
+      type: START
+    - id: researcher
+      type: AGENT
+      agent: researcher
+    - id: writer
+      type: AGENT
+      agent: writer
+    - id: end
+      type: END
+  edges:
+    - source: start
+      target: researcher
+    - source: researcher
+      target: writer
+    - source: writer
+      target: end

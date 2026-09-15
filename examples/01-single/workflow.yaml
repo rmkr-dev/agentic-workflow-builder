@@ -1,0 +1,37 @@
+apiVersion: agentforge/v1
+kind: Workflow
+metadata:
+  name: single-agent
+  description: Single agent answering a question
+  version: 0.1.0
+  tags: [single, example]
+spec:
+  pattern: single
+  runtime: langgraph
+  agents:
+    - id: assistant
+      role: assistant
+      system_prompt: You are a concise assistant.
+      tools: [echo]
+  tools:
+    - id: echo
+      kind: deterministic
+      deterministic_fn: echo
+      description: Echo input
+  nodes:
+    - id: start
+      type: START
+    - id: assistant
+      type: AGENT
+      agent: assistant
+    - id: end
+      type: END
+  edges:
+    - source: start
+      target: assistant
+    - source: assistant
+      target: end
+  policies:
+    tool:
+      default_deny: true
+      allowed_tools: [echo]

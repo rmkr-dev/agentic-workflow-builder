@@ -1,0 +1,47 @@
+apiVersion: agentforge/v1
+kind: Workflow
+metadata:
+  name: parallel-fanout
+  description: Fan-out parallel agents with join
+  version: 0.1.0
+  tags: [parallel, example]
+spec:
+  pattern: parallel
+  runtime: langgraph
+  agents:
+    - id: analyst_a
+      role: analyst
+      system_prompt: Analyze from angle A.
+    - id: analyst_b
+      role: analyst
+      system_prompt: Analyze from angle B.
+  nodes:
+    - id: start
+      type: START
+    - id: fanout
+      type: PARALLEL
+      parallel_of: [analyst_a, analyst_b]
+    - id: analyst_a
+      type: AGENT
+      agent: analyst_a
+    - id: analyst_b
+      type: AGENT
+      agent: analyst_b
+    - id: join
+      type: JOIN
+      join_of: [analyst_a, analyst_b]
+    - id: end
+      type: END
+  edges:
+    - source: start
+      target: fanout
+    - source: fanout
+      target: analyst_a
+    - source: fanout
+      target: analyst_b
+    - source: analyst_a
+      target: join
+    - source: analyst_b
+      target: join
+    - source: join
+      target: end

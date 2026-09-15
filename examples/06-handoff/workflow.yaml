@@ -1,0 +1,43 @@
+apiVersion: agentforge/v1
+kind: Workflow
+metadata:
+  name: handoff-chain
+  description: Explicit agent handoff chain
+  version: 0.1.0
+  tags: [handoff, example]
+spec:
+  pattern: handoff
+  runtime: langgraph
+  agents:
+    - id: intake
+      role: intake
+      system_prompt: Capture the user request.
+    - id: specialist
+      role: specialist
+      system_prompt: Solve the captured request.
+    - id: closer
+      role: closer
+      system_prompt: Summarize the resolution.
+  nodes:
+    - id: start
+      type: START
+    - id: intake
+      type: AGENT
+      agent: intake
+    - id: specialist
+      type: AGENT
+      agent: specialist
+    - id: closer
+      type: AGENT
+      agent: closer
+    - id: end
+      type: END
+  edges:
+    - source: start
+      target: intake
+    - source: intake
+      target: specialist
+    - source: specialist
+      target: closer
+    - source: closer
+      target: end
