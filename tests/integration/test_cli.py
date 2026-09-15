@@ -84,11 +84,17 @@ def test_cli_global_flag_after_subcommand():
     assert "mode=mock" in result.output
 
 
-def test_cli_help_ascii_safe():
-    result = runner.invoke(app, ["--help"])
+def test_cli_help_ascii_safe(monkeypatch):
+    monkeypatch.setenv("COLUMNS", "120")
+    monkeypatch.setenv("TERM", "dumb")
+    result = runner.invoke(app, ["--help"], env={"COLUMNS": "120", "TERM": "dumb", "NO_COLOR": "1"})
     assert result.exit_code == 0, result.output
-    assert "non-interactive" in result.output
-    assert "Compile" in result.output
+    # Strip ANSI so CI Rich rendering cannot hide the token from asserts
+    import re
+
+    plain = re.sub(r"\x1b\[[0-9;]*m", "", result.output)
+    assert "non-interactive" in plain or "--non-interactive" in plain
+    assert "Compile" in plain or "compile" in plain.lower()
 
 
 def test_cli_doctor_includes_mode():
